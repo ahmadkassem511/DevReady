@@ -1,0 +1,12 @@
+# Normalise line endings: LF in the repo, native on checkout.
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+
+# Binary assets — never touch.
+*.png binary
+*.jpeg binary
+*.jpg binary

@@ -1,0 +1,74 @@
+# =============================================================================
+# pyproject.toml  —  Build & packaging configuration for DevReady
+# -----------------------------------------------------------------------------
+# This file tells Python's packaging tools (pip, build, setuptools) how to
+# install DevReady, what its dependencies are, and which command-line entry
+# point to expose.
+#
+# For contributors:
+#   * Install the project in editable mode for development:
+#         pip install -e ".[dev]"
+#   * After editing this file, re-run the install command so changes apply.
+# =============================================================================
+
+[build-system]
+# setuptools is the most universally supported build backend, so it keeps the
+# barrier to contributing low. "wheel" is needed to produce installable wheels.
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devready"
+version = "0.1.0"
+description = "Set up any cloned project with a single command: devready start"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Ahmad Kassem", email = "ahmadkassemonline511@gmail.com" }]
+keywords = ["cli", "devtools", "onboarding", "setup", "automation", "llm"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+]
+
+# Runtime dependencies. We keep this list intentionally small so installing
+# DevReady is fast and unlikely to conflict with the project being set up.
+dependencies = [
+    "typer>=0.9.0",      # Declarative CLI framework (built on Click).
+    "rich>=13.0.0",      # Beautiful terminal output: tables, panels, spinners.
+    "httpx>=0.24.0",     # HTTP client used to talk to the OpenRouter API.
+]
+
+[project.optional-dependencies]
+# Extra packages only needed when developing/testing DevReady itself.
+dev = [
+    "pytest>=7.0.0",
+    "pytest-mock>=3.10.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ahmadkassem511/DevReady"
+Repository = "https://github.com/ahmadkassem511/DevReady"
+Issues = "https://github.com/ahmadkassem511/DevReady/issues"
+
+[project.scripts]
+# This is what makes `devready ...` available on the command line after install.
+# It points at the `app` Typer object inside devready/cli.py.
+devready = "devready.cli:app"
+
+[tool.setuptools.packages.find]
+# Auto-discover the `devready` package (and its sub-packages) but ignore tests.
+include = ["devready*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
