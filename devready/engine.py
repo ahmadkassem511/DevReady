@@ -51,6 +51,7 @@ class Engine:
         # Populated as the pipeline runs; later steps read these.
         self.detections: List[DetectionResult] = []
         self.insights: ReadmeInsights = ReadmeInsights()
+        self._install_ok: bool = True  # set False if a dep-install step fails
 
     # =========================================================================
     # Internal state persistence
@@ -174,7 +175,17 @@ class Engine:
             return
         for det in self.detections:
             console.print(f"  Setting up [bold]{det.language}[/bold]…")
-            version_manager.setup_environment(self.project_dir, det)
+            outcomes = version_manager.setup_environment(self.project_dir, det)
+            # Report any failed sub-steps so the user knows before we try to launch.
+            for outcome in outcomes:
+                if not outcome.ok:
+                    console.print(
+                        f"  [warning]A setup command exited with code {outcome.returncode}:\n"
+                        f"  [muted]{outcome.command}[/muted]\n"
+                        f"  Some dependencies may be missing. Run the command above manually "
+                        f"to see the full error.[/warning]"
+                    )
+            self._install_ok = all(o.ok for o in outcomes) if outcomes else True
 
     # -- Step 5: Environment variables ---------------------------------------
     def _step_env_vars(self) -> None:
@@ -194,6 +205,17 @@ class Engine:
             return
         if not command_exists("docker"):
             console.print("  [warning]docker-compose found but Docker isn't installed.[/warning]")
+            return
+
+        # `docker` on PATH doesn't mean the daemon is running. `docker info`
+        # talks to the daemon and fails fast if it's not started yet.
+        daemon_check = run_command(["docker", "info"])
+        if not daemon_check.ok:
+            console.print(
+                "  [warning]Docker is installed but the daemon isn't running.\n"
+                "  Start Docker Desktop (or run 'sudo systemctl start docker' on Linux),\n"
+                "  then re-run [bold]devready start[/bold] to bring up services.[/warning]"
+            )
             return
 
         answer = console.input(f"  Start services from {compose.name}? [Y/n] ").strip().lower()
@@ -249,28 +271,63 @@ class Engine:
     def _step_launch(self) -> None:
         print_step(8, TOTAL_STEPS, "Launch")
 
+        # Don't launch if a dependency install step failed — the process would
+        # crash immediately with a ModuleNotFoundError anyway, and the user
+        # needs to fix dependencies first.
+        if not self._install_ok:
+            console.print(
+                "  [warning]Skipping launch: one or more install steps failed.\n"
+                "  Fix the dependency errors above, then re-run [bold]devready start[/bold].[/warning]"
+            )
+            return
+
         start_cmd = self._determine_start_command()
         if start_cmd is None:
             console.print("  [muted]Couldn't determine a start command. Set it up manually.[/muted]")
             return
 
         console.print(f"  Launching: [bold]{' '.join(start_cmd)}[/bold]")
-        # Launch the server as a detached child so DevReady can return while it
-        # keeps running. We record the PID so `devready stop` can find it.
         try:
-            process = subprocess.Popen(start_cmd, cwd=str(self.project_dir))
+            # Capture stderr so we can show it if the process crashes on startup.
+            process = subprocess.Popen(
+                start_cmd,
+                cwd=str(self.project_dir),
+                stderr=subprocess.PIPE,
+            )
         except (OSError, ValueError) as exc:
             console.print(f"  [error]Failed to launch: {exc}[/error]")
             return
 
+        # Poll for 3 seconds: if the process exits immediately it crashed.
+        for _ in range(6):
+            time.sleep(0.5)
+            if process.poll() is not None:
+                stderr_out = ""
+                try:
+                    stderr_out = (process.stderr.read() or b"").decode(errors="replace").strip()
+                except Exception:
+                    pass
+                console.print(f"  [error]Server exited immediately (code {process.returncode}).[/error]")
+                if stderr_out:
+                    # Show just the last few lines — enough to diagnose the problem.
+                    last_lines = "\n".join(stderr_out.splitlines()[-6:])
+                    console.print(f"  [muted]{last_lines}[/muted]")
+                console.print(
+                    "  [warning]Tip: activate the venv manually and run the command above\n"
+                    "  to see the full traceback:[/warning]\n"
+                    f"  [bold]{' '.join(start_cmd)}[/bold]"
+                )
+                return
+            break  # still running after first half-second — looks good
+
         self._write_state(pid=process.pid, start_command=start_cmd)
 
-        # Give the server a moment, then open the browser to the likely URL.
+        # Give the server a moment to bind its port, then open the browser.
         port = self._guess_port()
         if port:
             url = f"http://localhost:{port}"
             console.print(f"  Opening [link={url}]{url}[/link] …")
-            time.sleep(2)  # crude readiness wait; enough for most dev servers
+            time.sleep(2)
             try:
                 webbrowser.open(url)
             except webbrowser.Error:
