@@ -274,23 +274,33 @@ class Engine:
         because no method was found, the required tool is missing, or the user
         declined.
         """
-        runnable = strategies.available_strategies(self.project_dir)
-        if not runnable:
-            # Detected something but its tool isn't installed? Say so once.
-            detected = strategies.detect_setup_strategies(self.project_dir)
-            if detected:
-                s = detected[0]
-                console.print(
-                    f"  [muted]This project ships a '{s.display}' setup, but '{s.runner}' "
-                    f"isn't installed — using DevReady's standard setup instead.[/muted]"
-                )
+        detected = strategies.detect_setup_strategies(self.project_dir)
+        if not detected:
             return False
 
-        strategy = runnable[0]
-        console.print(f"  This project provides its own setup: [bold]{strategy.display}[/bold]")
-        if not self._confirm("  Run the project's setup instead of the default? [Y/n] "):
-            console.print("  [muted]Skipping it — using DevReady's standard setup instead.[/muted]")
-            return False
+        strategy = detected[0]
+
+        # If the tool that runs this setup isn't installed, offer to install it
+        # and then continue — DevReady shouldn't dead-end on a missing tool.
+        if not command_exists(strategy.runner):
+            console.print(
+                f"  This project sets up with [bold]{strategy.display}[/bold], "
+                f"but [bold]{strategy.runner}[/bold] isn't installed."
+            )
+            if not self._confirm(
+                f"  Install {strategy.runner} and run the project's setup? [Y/n] "
+            ):
+                console.print("  [muted]Skipping it — using DevReady's standard setup instead.[/muted]")
+                return False
+            if not system_deps.install_tool(strategy.runner):
+                console.print("  [muted]Falling back to DevReady's standard setup.[/muted]")
+                return False
+            # Tool is now available — fall through and run the strategy.
+        else:
+            console.print(f"  This project provides its own setup: [bold]{strategy.display}[/bold]")
+            if not self._confirm("  Run the project's setup instead of the default? [Y/n] "):
+                console.print("  [muted]Skipping it — using DevReady's standard setup instead.[/muted]")
+                return False
 
         console.print(f"  Running [bold]{strategy.display}[/bold]…")
         result = run_command(strategy.command, cwd=str(self.project_dir), capture=False)

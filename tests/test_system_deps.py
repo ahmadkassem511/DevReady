@@ -36,3 +36,20 @@ def test_deduplicates_installable_packages():
 
 def test_empty_input():
     assert normalize_packages([]) == ([], [])
+
+
+def test_install_tool_noop_when_already_present():
+    # Python is guaranteed to be on PATH while the tests run, so install_tool
+    # must short-circuit to True without trying to install anything.
+    from devready.environment.system_deps import install_tool
+
+    assert install_tool("python") is True
+
+
+def test_tool_packages_have_make_mappings():
+    # `make` is the canonical auto-install case; ensure it maps for common managers.
+    from devready.environment.system_deps import TOOL_PACKAGES
+
+    assert TOOL_PACKAGES["make"]["choco"] == "make"
+    assert TOOL_PACKAGES["make"]["brew"] == "make"
+    assert TOOL_PACKAGES["make"]["apt"] == "make"

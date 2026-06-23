@@ -14,7 +14,9 @@ Design notes for contributors:
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 from typing import List, Optional
 
 from ..utils import (
@@ -117,6 +119,81 @@ def normalize_packages(packages: List[str]) -> tuple[List[str], List[str]]:
 def resolve_package_name(generic: str, manager: str) -> str:
     """Translate a generic package name into the manager-specific name."""
     return PACKAGE_MAP.get(generic, {}).get(manager, generic)
+
+
+# Build/orchestration tools DevReady may need to *run* a project's own setup
+# (e.g. a Makefile). Maps the tool to its package id per package manager so we
+# can auto-install it. Unlisted managers fall back to the tool's own name.
+TOOL_PACKAGES = {
+    "make": {
+        "choco": "make", "scoop": "make", "winget": "ezwinports.make",
+        "brew": "make", "apt": "make", "apt-get": "make", "dnf": "make",
+        "yum": "make", "pacman": "make",
+    },
+    "just": {"choco": "just", "scoop": "just", "brew": "just", "pacman": "just"},
+    "task": {"scoop": "task", "brew": "go-task", "choco": "go-task"},
+}
+
+# Where each package manager drops executables, so we can make a freshly
+# installed tool visible to the *current* process without opening a new shell.
+_MANAGER_BIN_DIRS = {
+    "choco": [r"C:\ProgramData\chocolatey\bin"],
+    "scoop": [os.path.expanduser(r"~\scoop\shims")],
+    "winget": [os.path.expanduser(r"~\AppData\Local\Microsoft\WinGet\Links")],
+    "brew": ["/opt/homebrew/bin", "/usr/local/bin"],
+}
+
+
+def _refresh_path(manager: str) -> None:
+    """Add a package manager's bin dir to this process's PATH after an install.
+
+    Newly installed tools land in a dir that's on PATH for *new* shells, but the
+    running process won't see it. Appending it here lets DevReady use the tool
+    immediately and continue, rather than asking the user to re-run.
+    """
+    path = os.environ.get("PATH", "")
+    for directory in _MANAGER_BIN_DIRS.get(manager, []):
+        if directory and Path(directory).exists() and directory not in path:
+            path = path + os.pathsep + directory
+    os.environ["PATH"] = path
+
+
+def install_tool(name: str) -> bool:
+    """Install a single tool via the system package manager. No prompt here.
+
+    Callers are expected to have already gotten the user's consent (DevReady
+    asks once, then installs the tool *and* continues the setup). Returns True
+    when the tool is available afterwards.
+    """
+    if command_exists(name):
+        return True
+
+    manager = detect_package_manager()
+    if manager is None:
+        console.print(
+            f"  [warning]No supported package manager found to install '{name}'. "
+            f"Please install it manually.[/warning]"
+        )
+        return False
+
+    pkg = TOOL_PACKAGES.get(name, {}).get(manager, name)
+    command = [part.replace("{pkg}", pkg) for part in INSTALL_TEMPLATES[manager]]
+    console.print(f"  Installing [bold]{name}[/bold] via [bold]{manager}[/bold]…")
+    result = run_command(command, capture=False)
+    if not result.ok:
+        console.print(f"  [error]Failed to install {name} (exit {result.returncode}).[/error]")
+        return False
+
+    # Make it usable in this same run.
+    _refresh_path(manager)
+    if command_exists(name):
+        console.print(f"  [success]{name} installed.[/success]")
+        return True
+    console.print(
+        f"  [warning]{name} was installed but isn't visible yet on PATH. "
+        f"Open a new terminal and re-run [bold]devready start[/bold].[/warning]"
+    )
+    return False
 
 
 def is_installed(binary: str) -> bool:
