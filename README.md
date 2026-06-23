@@ -120,8 +120,9 @@ export OPENROUTER_API_KEY="sk-or-..."
 
 | Command | Description |
 |---------|-------------|
-| `devready start [path]` | Run the full detect → set up → launch pipeline. |
-| `devready status [path]` | Show whether the server/services are running. |
+| `devready start [path]` | Run the full detect → set up → launch pipeline. **Use this the first time** (and after `git pull`). |
+| `devready run [path]` | **Relaunch a set-up project — fast.** Skips all setup and reuses the saved start command. Use this every day after the first `start`. |
+| `devready status [path]` | Show run state, the saved start command, and the URL. |
 | `devready stop [path]` | Stop the launched server and any started services. |
 | `devready clean [path]` | Remove DevReady-managed artifacts (`.venv`, state). |
 | `devready doctor` | Diagnose your toolchain and configuration. |
@@ -130,6 +131,25 @@ export OPENROUTER_API_KEY="sk-or-..."
 | `devready --version` | Print the version. |
 
 `path` defaults to the current directory in every command.
+
+### Typical workflow
+
+```bash
+git clone https://github.com/some/project && cd project
+devready start     # first time: detect, install, configure, launch → opens the URL
+# ...later, to run it again:
+devready run       # instant relaunch, no re-setup
+```
+
+Because every project has its own `.venv`, Python version, and saved state, you
+can `devready start` any number of projects and they never interfere — switch
+between them with a plain `cd` and `devready run`.
+
+> **`devready` vs `python -m devready`** — both work. After `pip install`, the
+> `devready` command should be available directly. If your shell says
+> "command not found", the Python *Scripts* directory isn't on your `PATH`; add
+> it (e.g. `C:\Users\<you>\AppData\Roaming\Python\Python3xx\Scripts` on Windows),
+> open a new terminal, or just keep using `python -m devready` — it's identical.
 
 ## How configuration is stored
 
