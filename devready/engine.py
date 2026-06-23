@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple
 from rich.table import Table
 
 from .ai import ReadmeInsights, parse_readme
-from .config import Config
+from .config import Config, list_projects, register_project
 from .detectors import DetectionResult, detect_stack
 from .environment import env_vars, strategies, system_deps, version_manager
 from .utils import (
@@ -94,6 +94,26 @@ class Engine:
         state.update(fields)
         self._state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
+    def _state_processes(self, state: dict) -> List[dict]:
+        """Return launched-process records, upgrading the legacy single-PID format.
+
+        Older state files (before multi-process launch) stored a single ``pid`` /
+        ``start_command`` / ``port`` at the top level; we normalise that into the
+        same list shape the rest of the code expects.
+        """
+        processes = state.get("processes")
+        if processes:
+            return processes
+        if state.get("pid") or state.get("start_command"):
+            return [{
+                "name": "root",
+                "pid": state.get("pid"),
+                "command": state.get("start_command", []),
+                "port": state.get("port"),
+                "cwd": str(self.project_dir),
+            }]
+        return []
+
     def _read_state(self) -> dict:
         """Read the persisted state, returning {} if none exists."""
         if self._state_file.exists():
@@ -110,6 +130,9 @@ class Engine:
         """Run the complete setup pipeline, stopping early only on fatal errors."""
         print_banner("[bold cyan]DevReady[/bold cyan] — getting your project ready 🚀")
         console.print(f"[muted]Project: {self.project_dir}[/muted]")
+
+        # Record this project so `devready list` can show it later.
+        register_project(self.project_dir)
 
         self._step_detect()
         self._step_analyze_readme()
@@ -138,35 +161,43 @@ class Engine:
         console.print(f"[muted]Project: {self.project_dir}[/muted]\n")
 
         state = self._read_state()
+        saved = self._state_processes(state)
 
-        # If it's already running, don't start a duplicate.
-        pid = state.get("pid")
-        if pid and _pid_alive(pid):
-            port = state.get("port")
-            where = f" at http://localhost:{port}" if port else ""
-            console.print(
-                f"  [success]Already running[/success] (pid {pid}){where}.\n"
-                "  Use [bold]devready stop[/bold] first if you want to restart it."
-            )
+        # If anything's already running, don't start a duplicate.
+        alive = [p for p in saved if p.get("pid") and _pid_alive(p["pid"])]
+        if alive:
+            console.print("  [success]Already running:[/success]")
+            for proc in alive:
+                port = proc.get("port")
+                where = f" → http://localhost:{port}" if port else ""
+                console.print(f"    • [bold]{proc.get('name', 'server')}[/bold]{where}")
+            console.print("  Use [bold]devready stop[/bold] first if you want to restart it.")
             return
 
-        start_cmd = state.get("start_command")
-        port = state.get("port")
+        # Relaunch the components saved by the last `start`.
+        if saved:
+            targets = [
+                {"name": p.get("name", "root"),
+                 "cwd": p.get("cwd", str(self.project_dir)),
+                 "command": p["command"],
+                 "port": p.get("port")}
+                for p in saved if p.get("command")
+            ]
+            if targets:
+                self._launch_targets(targets)
+                return
 
-        # No saved command yet — detect one without doing a full setup.
-        if not start_cmd:
-            console.print(
-                "  [muted]No saved launch command — detecting one "
-                "(run [bold]devready start[/bold] for a full setup).[/muted]"
-            )
-            self.detections = detect_stack(self.project_dir)
-            start_cmd, port = self._resolve_launch()
-
-        if not start_cmd:
+        # No saved launch — detect one on the fly without a full setup.
+        console.print(
+            "  [muted]No saved launch command — detecting one "
+            "(run [bold]devready start[/bold] for a full setup).[/muted]"
+        )
+        self.detections = detect_stack(self.project_dir)
+        targets = self._collect_launch_targets()
+        if not targets:
             self._no_server_help()
             return
-
-        self._launch(start_cmd, port)
+        self._launch_targets(targets)
 
     # -- Step 1: Project detection -------------------------------------------
     def _step_detect(self) -> None:
@@ -471,82 +502,117 @@ class Engine:
             )
             return
 
-        start_cmd, port = self._resolve_launch()
-        if start_cmd is None:
+        targets = self._collect_launch_targets()
+        if not targets:
             self._no_server_help()
             return
 
-        self._launch(start_cmd, port)
+        self._launch_targets(targets)
 
-    def _launch(self, start_cmd: List[str], port: Optional[int]) -> bool:
-        """Spawn the project's server, wait for it, and hand over the URL.
+    def _collect_launch_targets(self) -> List[dict]:
+        """Find everything runnable: the root app plus any sub-project servers.
 
-        Shared by ``devready start`` (step 8) and ``devready run`` (relaunch from
-        saved state). Returns True if the server started and stayed up.
+        Returns a list of ``{name, cwd, command, port}`` dicts. For a monorepo
+        with, say, a backend and a frontend, this yields both so they start
+        together. Components that aren't servers (no resolvable start command)
+        are simply omitted.
         """
-        console.print(f"  Launching: [bold]{' '.join(start_cmd)}[/bold]")
+        targets: List[dict] = []
 
-        # Redirect the server's output to a log file rather than a PIPE. Reading
-        # a PIPE only on crash risks deadlocking a long-running server once its
-        # output buffer fills; a file never blocks and still lets us show the
-        # error if it crashes.
+        cmd, port = self._resolve_launch()
+        if cmd:
+            targets.append({"name": "root", "cwd": str(self.project_dir), "command": cmd, "port": port})
+
+        # Sub-project servers (e.g. a frontend/ that has an npm dev script).
+        for subdir, results in self._detect_subprojects():
+            sub = Engine(project_dir=subdir, config=self.config)
+            sub.detections = results
+            sub_cmd, sub_port = sub._resolve_launch()
+            if sub_cmd:
+                targets.append(
+                    {"name": subdir.name, "cwd": str(subdir), "command": sub_cmd, "port": sub_port}
+                )
+
+        return targets
+
+    def _launch_targets(self, targets: List[dict]) -> None:
+        """Spawn each target, wait for it, persist state, and hand over URL(s)."""
+        records: List[dict] = []
+        for target in targets:
+            record = self._spawn_and_check(target)
+            if record:
+                records.append(record)
+
+        if not records:
+            return  # crash details already shown
+
+        # Persist all running processes (preserve any docker flag already set).
+        self._write_state(processes=records, docker=self._read_state().get("docker", False))
+        self._announce_running(records)
+
+    def _spawn_and_check(self, target: dict) -> Optional[dict]:
+        """Start one component and watch ~3s for an immediate crash.
+
+        Output is streamed to a per-component log file (never a PIPE, which could
+        deadlock a chatty long-running server). Returns a state record on
+        success, or None if it failed/crashed (with the error shown).
+        """
+        name, cwd, command, port = target["name"], target["cwd"], target["command"], target["port"]
+        label = "" if name == "root" else f" [{name}]"
+        console.print(f"  Launching{label}: [bold]{' '.join(command)}[/bold]")
+
         self._state_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self._state_dir / "last-run.log"
+        log_name = "last-run.log" if name == "root" else f"last-run-{name}.log"
+        log_path = self._state_dir / log_name
         try:
             log_file = open(log_path, "w", encoding="utf-8", errors="replace")
-            process = subprocess.Popen(
-                start_cmd,
-                cwd=str(self.project_dir),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-            )
+            process = subprocess.Popen(command, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT)
         except (OSError, ValueError) as exc:
-            console.print(f"  [error]Failed to launch: {exc}[/error]")
-            return False
+            console.print(f"  [error]Failed to launch{label}: {exc}[/error]")
+            return None
 
-        # Watch for an early crash (up to ~3s). If the process exits, show the
-        # tail of its log so the user sees the real error immediately.
-        crashed = False
         for _ in range(6):
             time.sleep(0.5)
             if process.poll() is not None:
-                crashed = True
-                break
-        if crashed:
-            console.print(f"  [error]Server exited immediately (code {process.returncode}).[/error]")
-            self._print_log_tail(log_path)
-            console.print(
-                "  [warning]Run the command above manually to see the full traceback. "
-                f"Full log: {log_path}[/warning]"
-            )
-            return False
+                console.print(f"  [error]{name} exited immediately (code {process.returncode}).[/error]")
+                self._print_log_tail(log_path)
+                console.print(f"  [muted]Full log: {log_path}[/muted]")
+                return None
 
-        self._write_state(pid=process.pid, start_command=start_cmd, port=port)
+        return {"name": name, "pid": process.pid, "command": command, "port": port, "cwd": cwd}
 
-        # Wait until the server actually accepts connections, THEN hand over the
-        # URL — so "it's ready" is true, not just hopeful.
-        url = f"http://localhost:{port}" if port else None
-        if port:
-            console.print(f"  Waiting for the server to come up on port {port}…")
+    def _announce_running(self, records: List[dict]) -> None:
+        """Wait for ports, open the primary URL, and print a summary."""
+        opened = False
+        for record in records:
+            port = record.get("port")
+            if not port:
+                continue
+            url = f"http://localhost:{port}"
+            console.print(f"  Waiting for {record['name']} on port {port}…")
             if self._wait_for_port(port):
-                console.print(f"  Opening [link={url}]{url}[/link]")
-                try:
-                    webbrowser.open(url)
-                except webbrowser.Error:
-                    pass
+                # Open just the first ready URL (usually the UI) to avoid a pile
+                # of browser tabs; the rest are printed below.
+                if not opened:
+                    console.print(f"  Opening [link={url}]{url}[/link]")
+                    try:
+                        webbrowser.open(url)
+                        opened = True
+                    except webbrowser.Error:
+                        pass
             else:
-                console.print(
-                    f"  [muted]No response on port {port} yet — it may still be starting. "
-                    f"Try {url} in a moment.[/muted]"
-                )
+                console.print(f"  [muted]No response on port {port} yet — it may still be starting.[/muted]")
 
-        # Final, prominent hand-off — the one line a "dummy-friendly" tool owes you.
-        if url:
-            console.print(f"\n  [success]✓ Your project is running at[/success] [bold link={url}]{url}[/bold link]")
-        else:
+        # Final hand-off summary.
+        urls = [(r["name"], r.get("port")) for r in records]
+        if len(records) == 1 and not records[0].get("port"):
             console.print("\n  [success]✓ Your project is running.[/success]")
-        console.print("  Stop it anytime with [bold]devready stop[/bold].")
-        return True
+        else:
+            console.print("\n  [success]✓ Running:[/success]")
+            for name, port in urls:
+                where = f" → http://localhost:{port}" if port else " (no web URL)"
+                console.print(f"    • [bold]{name}[/bold]{where}")
+        console.print("  Stop everything with [bold]devready stop[/bold].")
 
     def _resolve_launch(self) -> Tuple[Optional[List[str]], Optional[int]]:
         """Return ``(command, port)`` for starting the project, or ``(None, None)``.
@@ -803,51 +869,53 @@ class Engine:
     # Public command: status
     # =========================================================================
     def status(self) -> None:
-        """Report whether the project's server and services are running."""
+        """Report whether the project's server(s) and services are running."""
         state = self._read_state()
-        pid = state.get("pid")
+        processes = self._state_processes(state)
 
         table = Table(title="DevReady status", show_header=False)
         table.add_column("Field", style="bold")
         table.add_column("Value")
         table.add_row("Project", str(self.project_dir))
 
-        running = bool(pid and _pid_alive(pid))
-        if running:
-            table.add_row("Server", f"[success]running[/success] (pid {pid})")
+        any_running = False
+        if processes:
+            for proc in processes:
+                pid = proc.get("pid")
+                running = bool(pid and _pid_alive(pid))
+                any_running = any_running or running
+                state_text = f"[success]running[/success] (pid {pid})" if running else "[muted]not running[/muted]"
+                port = proc.get("port")
+                url = f" — http://localhost:{port}" if port else ""
+                table.add_row(proc.get("name", "server"), state_text + url)
         else:
-            table.add_row("Server", "[muted]not running[/muted]")
-
-        # Show the saved launch details whether or not it's currently running,
-        # so the user always knows how this project starts and where to reach it.
-        saved_cmd = state.get("start_command")
-        if saved_cmd:
-            table.add_row("Start command", " ".join(saved_cmd))
-        port = state.get("port")
-        if port:
-            table.add_row("URL", f"http://localhost:{port}")
+            table.add_row("Server", "[muted]nothing set up yet[/muted]")
 
         table.add_row("Docker services", "started" if state.get("docker") else "—")
         console.print(table)
 
-        # Friendly hint about the fast relaunch command.
-        if not running and saved_cmd:
-            console.print("\n[muted]Run [bold]devready run[/bold] to relaunch it.[/muted]")
+        if not any_running and processes:
+            console.print("\n[muted]Run [bold]devready run[/bold] to relaunch.[/muted]")
 
     # =========================================================================
     # Public command: stop
     # =========================================================================
     def stop(self) -> None:
-        """Stop the launched server and any Docker services we started."""
+        """Stop every launched component and any Docker services we started."""
         state = self._read_state()
-        pid = state.get("pid")
+        processes = self._state_processes(state)
 
-        if pid and _pid_alive(pid):
-            console.print(f"  Stopping server (pid {pid})…")
-            _terminate_pid(pid)
-            console.print("  [success]Server stopped.[/success]")
+        stopped = 0
+        for proc in processes:
+            pid = proc.get("pid")
+            if pid and _pid_alive(pid):
+                console.print(f"  Stopping {proc.get('name', 'server')} (pid {pid})…")
+                _terminate_pid(pid)
+                stopped += 1
+        if stopped:
+            console.print(f"  [success]Stopped {stopped} process(es).[/success]")
         else:
-            console.print("  [muted]No running server recorded.[/muted]")
+            console.print("  [muted]No running processes recorded.[/muted]")
 
         if state.get("docker") and command_exists("docker"):
             console.print("  Stopping Docker services…")
@@ -855,7 +923,7 @@ class Engine:
             run_command(base + ["down"], cwd=str(self.project_dir), capture=False)
 
         # Clear the runtime fields but keep the state file around.
-        self._write_state(pid=None, docker=False)
+        self._write_state(processes=[], pid=None, docker=False)
 
     # =========================================================================
     # Public command: clean
@@ -911,6 +979,47 @@ class Engine:
             table.add_row("LLM", "[warning]not configured — using regex fallback[/warning]")
 
         console.print(table)
+
+    # =========================================================================
+    # Public command: list (all projects DevReady has set up)
+    # =========================================================================
+    @classmethod
+    def list_all(cls) -> None:
+        """Print every project DevReady has set up, with its current run status."""
+        projects = list_projects()
+        if not projects:
+            console.print(
+                "[muted]No projects yet. Run [bold]devready start[/bold] in a project "
+                "to get going.[/muted]"
+            )
+            return
+
+        table = Table(title="DevReady projects", show_header=True, header_style="bold")
+        table.add_column("Project")
+        table.add_column("Status")
+        table.add_column("URL(s)")
+
+        for entry in projects:
+            path = Path(entry.get("path", ""))
+            if not path.exists():
+                table.add_row(str(path), "[muted]missing[/muted]", "—")
+                continue
+
+            engine = cls(project_dir=path)
+            processes = engine._state_processes(engine._read_state())
+            running = [p for p in processes if p.get("pid") and _pid_alive(p["pid"])]
+
+            if running:
+                status = "[success]running[/success]"
+                ports = [p["port"] for p in running if p.get("port")]
+            else:
+                status = "[muted]stopped[/muted]"
+                ports = [p["port"] for p in processes if p.get("port")]
+            urls = ", ".join(f"localhost:{port}" for port in ports) or "—"
+            table.add_row(str(path), status, urls)
+
+        console.print(table)
+        console.print("\n[muted]cd into any of these and run [bold]devready run[/bold] to relaunch.[/muted]")
 
 
 # -----------------------------------------------------------------------------

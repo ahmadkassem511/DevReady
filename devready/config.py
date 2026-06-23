@@ -23,8 +23,9 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # The free model we default to. It requires no credit card and is capable
 # enough for parsing README files. OpenRouter occasionally retires free models
@@ -47,6 +48,47 @@ def config_dir() -> Path:
 def config_path() -> Path:
     """Return the full path to ``config.json``."""
     return config_dir() / "config.json"
+
+
+# -----------------------------------------------------------------------------
+# Project registry — the list of projects DevReady has set up (for `devready list`)
+# -----------------------------------------------------------------------------
+def projects_path() -> Path:
+    """Return the path to the project registry (``~/.devready/projects.json``)."""
+    return config_dir() / "projects.json"
+
+
+def _load_projects() -> List[Dict[str, str]]:
+    path = projects_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8")).get("projects", [])
+        except (json.JSONDecodeError, OSError):
+            return []
+    return []
+
+
+def register_project(project_dir: Path) -> None:
+    """Record (or refresh) a project in the global registry.
+
+    Called by ``devready start`` so ``devready list`` can later show every
+    project the user has set up, newest activity first.
+    """
+    resolved = str(Path(project_dir).resolve())
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    projects = [p for p in _load_projects() if p.get("path") != resolved]
+    projects.insert(0, {"path": resolved, "last_setup": now})
+
+    config_dir().mkdir(parents=True, exist_ok=True)
+    projects_path().write_text(
+        json.dumps({"projects": projects}, indent=2), encoding="utf-8"
+    )
+
+
+def list_projects() -> List[Dict[str, str]]:
+    """Return the registered projects (most recently set up first)."""
+    return _load_projects()
 
 
 @dataclass

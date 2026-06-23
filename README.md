@@ -41,7 +41,7 @@ eight steps:
 | 5. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
 | 6. **Services** | If a `docker-compose.yml` exists (and Docker is running), offers to start the services. |
 | 7. **Migrations** | Detects and runs migrations (Django, Alembic, Knex…). |
-| 8. **Launch** | Picks the right start command for the framework (Streamlit, Django, FastAPI, Flask, or your npm `dev`/`start` script), **waits until the server actually responds**, then prints and opens the URL — e.g. `http://localhost:8501`. For CLI/library/pipeline projects with no web server, it instead shows you how to run it (Makefile targets and README commands). |
+| 8. **Launch** | Picks the right start command for the framework (Streamlit, Django, FastAPI, Flask, or your npm `dev`/`start` script), **waits until the server actually responds**, then prints and opens the URL — e.g. `http://localhost:8501`. **Monorepos** start every component together (e.g. backend on 8000 + frontend on 3000). For CLI/library/pipeline projects with no web server, it instead shows you how to run it. |
 
 Every step is **non-destructive and asks before changing your system** where it
 matters (use `--yes` to accept all prompts for unattended runs). DevReady is
@@ -171,8 +171,9 @@ export OPENROUTER_API_KEY="sk-or-..."
 | Command | Description |
 |---------|-------------|
 | `devready start [path] [--yes]` | Run the full detect → set up → launch pipeline. **Use this the first time** (and after `git pull`). Add `--yes`/`-y` for an unattended run that accepts every prompt. |
-| `devready run [path]` | **Relaunch a set-up project — fast.** Skips all setup and reuses the saved start command. Use this every day after the first `start`. |
-| `devready status [path]` | Show run state, the saved start command, and the URL. |
+| `devready run [path]` | **Relaunch a set-up project — fast.** Skips all setup and relaunches every saved component. Use this every day after the first `start`. |
+| `devready list` | List every project DevReady has set up, with its run status and URLs. |
+| `devready status [path]` | Show run state and URL(s) for each component. |
 | `devready stop [path]` | Stop the launched server and any started services. |
 | `devready clean [path]` | Remove DevReady-managed artifacts (`.venv`, state). |
 | `devready doctor` | Diagnose your toolchain and configuration. |
@@ -325,8 +326,7 @@ offline.
 - Per-project version auto-install for more runtimes (Go, Ruby, Java) the way
   uv handles Python.
 - Richer migration detection (Prisma, TypeORM, Flyway, EF Core).
-- Launch orchestration for monorepos (start backend + frontend together).
-- A `devready list` overview of all projects DevReady has set up.
+- Auto-install full language SDKs (cargo/go/ruby/php/dotnet) on demand.
 
 ## License
 

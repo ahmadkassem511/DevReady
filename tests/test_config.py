@@ -50,6 +50,22 @@ def test_env_var_overrides_stored_key(tmp_path, monkeypatch):
     assert reloaded.llm.api_key == "sk-or-fromenv"
 
 
+def test_register_and_list_projects(tmp_path, monkeypatch):
+    _redirect_home(tmp_path, monkeypatch)
+    from devready.config import list_projects, register_project
+
+    register_project(tmp_path / "proj-a")
+    register_project(tmp_path / "proj-b")
+    # Re-registering proj-a should move it to the front, not duplicate it.
+    register_project(tmp_path / "proj-a")
+
+    projects = list_projects()
+    paths = [p["path"] for p in projects]
+    assert len(paths) == 2  # no duplicates
+    assert paths[0] == str((tmp_path / "proj-a").resolve())  # most recent first
+    assert all("last_setup" in p for p in projects)
+
+
 def test_corrupt_config_falls_back_to_defaults(tmp_path, monkeypatch):
     _redirect_home(tmp_path, monkeypatch)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

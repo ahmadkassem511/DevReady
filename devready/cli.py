@@ -8,6 +8,7 @@ modules, not here — that keeps the commands testable and the CLI readable.
 Commands:
     devready start                      Run the full setup pipeline, then launch.
     devready run                        Relaunch an already-set-up project (fast).
+    devready list                       List all projects DevReady has set up.
     devready status                     Show whether the project is running.
     devready stop                       Stop the running server/services.
     devready clean                      Remove DevReady-managed artifacts.
@@ -133,6 +134,12 @@ def clean(
 def doctor() -> None:
     """Diagnose the local toolchain and DevReady configuration."""
     Engine().doctor()
+
+
+@app.command("list")
+def list_projects_cmd() -> None:
+    """List every project DevReady has set up, with its run status."""
+    Engine.list_all()
 
 
 # -----------------------------------------------------------------------------
