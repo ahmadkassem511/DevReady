@@ -62,6 +62,7 @@ class Engine:
         self.detections: List[DetectionResult] = []
         self.insights: ReadmeInsights = ReadmeInsights()
         self._install_ok: bool = True  # set False if a dep-install step fails
+        self._project_setup_ran: bool = False  # True if the project's own setup ran
 
     def _confirm(self, prompt: str, default_yes: bool = True) -> bool:
         """Ask a yes/no question, or auto-answer when running with --yes.
@@ -305,6 +306,7 @@ class Engine:
         console.print(f"  Running [bold]{strategy.display}[/bold]…")
         result = run_command(strategy.command, cwd=str(self.project_dir), capture=False)
         self._install_ok = result.ok
+        self._project_setup_ran = result.ok
         if result.ok:
             console.print(f"  [success]Project setup completed via {strategy.display}.[/success]")
         else:
@@ -606,30 +608,53 @@ class Engine:
         """Guide the user when there's no web server to launch.
 
         Many projects are CLIs, libraries, or pipelines with no localhost URL.
-        Instead of a dead-end "couldn't determine a start command", we surface
-        the most likely ways to run it: Makefile targets and the commands the
-        README documented.
+        We make clear that *setup is done* and surface only ways to *run* the
+        project — never setup/install commands (which would imply, misleadingly,
+        that setup still needs doing).
         """
-        console.print(
-            "  [warning]No web-server entrypoint found — this looks like a CLI, library, "
-            "or pipeline project (so there's no localhost URL).[/warning]"
-        )
+        if self._install_ok:
+            # Setup succeeded — say so plainly so "no URL" doesn't read as failure.
+            console.print(
+                "  [success]Setup is complete.[/success] This is a CLI / library / pipeline "
+                "project, so there's no web server or localhost URL to open."
+            )
+        else:
+            console.print(
+                "  [warning]No web-server entrypoint found, and setup didn't fully succeed — "
+                "see the messages above.[/warning]"
+            )
 
         targets = self._makefile_run_targets()
+        run_commands = self._readme_run_commands()
         if targets:
-            console.print("  It has a Makefile. Likely ways to run it:")
+            console.print("  To run it, try:")
             for target in targets:
                 console.print(f"    [bold]make {target}[/bold]")
-
-        # README-extracted commands are available after a full `start` run.
-        commands = [c for c in self.insights.commands if c]
-        if commands:
-            console.print("  Commands mentioned in the README:")
-            for cmd in commands[:6]:
+        elif run_commands:
+            console.print("  To run it, try:")
+            for cmd in run_commands[:5]:
                 console.print(f"    [muted]{cmd}[/muted]")
+        else:
+            console.print("  [muted]See the project's README for how to run it.[/muted]")
 
-        if not targets and not commands:
-            console.print("  [muted]Check the project's README for how to run it.[/muted]")
+    # Commands that are about *setting up* rather than *running* — we never show
+    # these as "how to run it" (they'd imply setup isn't finished).
+    _SETUP_NOISE = (
+        "git clone", "cd ", "pip install", "pip3 install", "npm install", "npm ci",
+        "yarn", "pnpm install", "poetry install", "pipenv install", "bundle install",
+        "composer install", "cargo build", "go mod", "dotnet restore", "make setup",
+        "make install", "make bootstrap", "make init", "setup.sh", "install.sh",
+        "bootstrap.sh", "cp .env", "python -m venv", "virtualenv", "./configure",
+        "pip install -r",
+    )
+
+    def _readme_run_commands(self) -> List[str]:
+        """README commands that look like ways to *run* the project, not set it up."""
+        run_cmds: List[str] = []
+        for cmd in self.insights.commands:
+            if cmd and not any(noise in cmd.lower() for noise in self._SETUP_NOISE):
+                run_cmds.append(cmd)
+        return run_cmds
 
     def _makefile_run_targets(self) -> List[str]:
         """Return Makefile targets that look like ways to run/demo the project."""
