@@ -141,10 +141,7 @@ class Engine:
             start_cmd, port = self._resolve_launch()
 
         if not start_cmd:
-            console.print(
-                "  [warning]Couldn't determine how to start this project.\n"
-                "  Run [bold]devready start[/bold] to set it up first.[/warning]"
-            )
+            self._no_server_help()
             return
 
         self._launch(start_cmd, port)
@@ -335,7 +332,7 @@ class Engine:
 
         start_cmd, port = self._resolve_launch()
         if start_cmd is None:
-            console.print("  [muted]Couldn't determine a start command. Start it manually.[/muted]")
+            self._no_server_help()
             return
 
         self._launch(start_cmd, port)
@@ -466,6 +463,51 @@ class Engine:
             if (self.project_dir / name).exists():
                 return name
         return None
+
+    def _no_server_help(self) -> None:
+        """Guide the user when there's no web server to launch.
+
+        Many projects are CLIs, libraries, or pipelines with no localhost URL.
+        Instead of a dead-end "couldn't determine a start command", we surface
+        the most likely ways to run it: Makefile targets and the commands the
+        README documented.
+        """
+        console.print(
+            "  [warning]No web-server entrypoint found — this looks like a CLI, library, "
+            "or pipeline project (so there's no localhost URL).[/warning]"
+        )
+
+        targets = self._makefile_run_targets()
+        if targets:
+            console.print("  It has a Makefile. Likely ways to run it:")
+            for target in targets:
+                console.print(f"    [bold]make {target}[/bold]")
+
+        # README-extracted commands are available after a full `start` run.
+        commands = [c for c in self.insights.commands if c]
+        if commands:
+            console.print("  Commands mentioned in the README:")
+            for cmd in commands[:6]:
+                console.print(f"    [muted]{cmd}[/muted]")
+
+        if not targets and not commands:
+            console.print("  [muted]Check the project's README for how to run it.[/muted]")
+
+    def _makefile_run_targets(self) -> List[str]:
+        """Return Makefile targets that look like ways to run/demo the project."""
+        makefile = self.project_dir / "Makefile"
+        if not makefile.exists():
+            return []
+        try:
+            text = makefile.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return []
+        targets = re.findall(r"^([a-zA-Z0-9_-]+):", text, re.MULTILINE)
+        known = {"run", "start", "serve", "dev", "demo", "up", "dev-server", "runserver"}
+        return [
+            t for t in targets
+            if t in known or t.startswith(("run", "start", "serve", "demo"))
+        ]
 
     def _find_streamlit_entry(self) -> Optional[str]:
         """Find the file that is actually the Streamlit app.

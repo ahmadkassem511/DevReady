@@ -14,7 +14,8 @@ Design notes for contributors:
 
 from __future__ import annotations
 
-from typing import List
+import re
+from typing import List, Optional
 
 from ..utils import (
     CommandResult,
@@ -45,6 +46,72 @@ PACKAGE_MAP = {
     "postgresql": {"apt": "postgresql", "brew": "postgresql", "choco": "postgresql"},
     "redis": {"apt": "redis-server", "brew": "redis", "choco": "redis-64"},
 }
+
+# Language runtimes are NOT installed as system packages — they're handled by
+# the per-project version managers (uv for Python, fnm/nvm for Node). A README
+# that lists "Python 3.10+" as a prerequisite must not trigger
+# `choco install Python 3.10+`. We drop these from the system-package list.
+RUNTIME_NAMES = {
+    "python", "python3", "python2", "py", "pip", "pip3",
+    "node", "nodejs", "node.js", "npm", "npx", "yarn", "pnpm",
+    "deno", "bun",
+}
+
+# Normalise common human/README spellings to the package-manager id used below.
+# Applied after stripping version specifiers (see _normalize_package).
+NAME_ALIASES = {
+    "node.js": "nodejs",
+    "node": "nodejs",
+    "postgres": "postgresql",
+    "postgresql server": "postgresql",
+    "imagemagick": "imagemagick",
+    "ffmpeg": "ffmpeg",
+}
+
+
+def _normalize_package(raw: str) -> Optional[str]:
+    """Clean a README-extracted package name into something installable.
+
+    Strips version requirements and noise ("Node.js 18+" -> "nodejs",
+    "Python 3.10+" -> "python", "FFmpeg" -> "ffmpeg"), applies known aliases,
+    and returns None for entries that aren't real, installable system packages.
+    """
+    if not raw:
+        return None
+    name = raw.strip().lower()
+    # Remove version specifiers and trailing requirement noise:
+    #   "node.js 18+", "python >= 3.10", "ffmpeg (latest)", "redis v7"
+    name = re.split(r"[><=~]|\bv?\d", name, maxsplit=1)[0]
+    name = name.replace("(latest)", "").strip(" .,-")
+    name = NAME_ALIASES.get(name, name)
+    # Reject empties or anything with whitespace left (likely a phrase, not a pkg).
+    if not name or " " in name:
+        # Try once more: collapse internal spaces for known multi-word aliases.
+        collapsed = NAME_ALIASES.get(raw.strip().lower())
+        return collapsed
+    return name
+
+
+def normalize_packages(packages: List[str]) -> tuple[List[str], List[str]]:
+    """Split raw package names into (installable, skipped-runtimes).
+
+    Returns a tuple ``(to_install, runtimes_skipped)`` where ``to_install`` is the
+    cleaned, de-duplicated list of real system packages and ``runtimes_skipped``
+    lists language runtimes that were dropped (so we can tell the user they're
+    handled elsewhere).
+    """
+    to_install: List[str] = []
+    runtimes: List[str] = []
+    for raw in packages:
+        cleaned = _normalize_package(raw)
+        if cleaned is None:
+            continue
+        if cleaned in RUNTIME_NAMES:
+            runtimes.append(cleaned)
+            continue
+        if cleaned not in to_install:
+            to_install.append(cleaned)
+    return to_install, runtimes
 
 
 def resolve_package_name(generic: str, manager: str) -> str:
@@ -77,6 +144,17 @@ def ensure_packages(
         Packages already present, or skipped by the user, produce no result.
     """
     results: List[CommandResult] = []
+    if not packages:
+        return results
+
+    # Clean the raw README-extracted names and drop language runtimes (those are
+    # set up by the per-project version managers, not the system installer).
+    packages, runtimes_skipped = normalize_packages(packages)
+    if runtimes_skipped:
+        console.print(
+            f"  [muted]Skipping runtime(s) {', '.join(sorted(set(runtimes_skipped)))} — "
+            f"handled per-project, not via the system package manager.[/muted]"
+        )
     if not packages:
         return results
 

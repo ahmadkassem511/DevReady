@@ -36,12 +36,12 @@ eight steps:
 |------|--------------|
 | 1. **Detect** | Scans for `package.json`, `requirements.txt`, `pyproject.toml`, etc. to identify languages, frameworks, and required versions. |
 | 2. **Read the README** | Uses a **free** LLM (via OpenRouter) — or an offline parser — to extract install commands, system packages, env vars, and DB steps from the README. |
-| 3. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`choco`, with your permission. |
+| 3. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`choco`, with your permission. Cleans up README-style names (`Node.js 18+` → `nodejs`) and skips language runtimes — those are handled per-project in step 4. |
 | 4. **Runtime & deps** | Picks the **correct Python version for this project** (reusing an installed one, or auto-downloading it with [uv](https://github.com/astral-sh/uv) — isolated, no system changes), builds that project's own `.venv`, and installs dependencies. For Node it uses [fnm](https://github.com/Schniz/fnm)/`nvm` for the required version when available, then runs `npm install`. |
 | 5. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
 | 6. **Services** | If a `docker-compose.yml` exists (and Docker is running), offers to start the services. |
 | 7. **Migrations** | Detects and runs migrations (Django, Alembic, Knex…). |
-| 8. **Launch** | Picks the right start command for the framework (Streamlit, Django, FastAPI, Flask, or your npm `dev`/`start` script), **waits until the server actually responds**, then prints and opens the URL — e.g. `http://localhost:8501`. |
+| 8. **Launch** | Picks the right start command for the framework (Streamlit, Django, FastAPI, Flask, or your npm `dev`/`start` script), **waits until the server actually responds**, then prints and opens the URL — e.g. `http://localhost:8501`. For CLI/library/pipeline projects with no web server, it instead shows you how to run it (Makefile targets and README commands). |
 
 Every step is **non-destructive and asks before changing your system** where it
 matters. DevReady is **100% free for end users** — the optional AI uses a free
