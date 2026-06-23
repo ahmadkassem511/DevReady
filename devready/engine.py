@@ -248,23 +248,79 @@ class Engine:
         if self._try_project_setup():
             return  # the project's own setup ran (or fully handled this step)
 
-        # 4b. Otherwise fall back to DevReady's language-native setup.
-        if not self.detections:
-            console.print("  [muted]No known stack to set up.[/muted]")
+        # 4b. Otherwise fall back to DevReady's language-native setup at the root.
+        if self.detections:
+            for det in self.detections:
+                console.print(f"  Setting up [bold]{det.language}[/bold]…")
+                outcomes = version_manager.setup_environment(self.project_dir, det)
+                # Report any failed sub-steps so the user knows before we launch.
+                for outcome in outcomes:
+                    if not outcome.ok:
+                        console.print(
+                            f"  [warning]A setup command exited with code {outcome.returncode}:\n"
+                            f"  [muted]{outcome.command}[/muted]\n"
+                            f"  Some dependencies may be missing. Run the command above manually "
+                            f"to see the full error.[/warning]"
+                        )
+                self._install_ok = all(o.ok for o in outcomes) if outcomes else self._install_ok
+        else:
+            console.print("  [muted]No known stack at the project root.[/muted]")
+
+        # 4c. Monorepos: set up sub-projects found one level down (e.g. a
+        #     frontend/ Node app next to a Python backend).
+        self._setup_subprojects()
+
+    # Directories we never descend into when scanning a monorepo for sub-projects.
+    _IGNORE_DIRS = {
+        "node_modules", ".venv", "venv", "env", ".git", ".hg", "dist", "build",
+        "__pycache__", ".devready", "target", "vendor", ".next", ".nuxt",
+        ".idea", ".vscode", "site-packages", ".tox", ".pytest_cache", "bin", "obj",
+    }
+
+    def _setup_subprojects(self) -> None:
+        """Detect and set up project components in immediate subdirectories.
+
+        Each sub-project is set up with the same language-native logic as the
+        root, in its own directory — so a monorepo (Python API + Node frontend,
+        say) is fully bootstrapped. We ask before each one (unless --yes).
+        """
+        subprojects = self._detect_subprojects()
+        if not subprojects:
             return
-        for det in self.detections:
-            console.print(f"  Setting up [bold]{det.language}[/bold]…")
-            outcomes = version_manager.setup_environment(self.project_dir, det)
-            # Report any failed sub-steps so the user knows before we try to launch.
-            for outcome in outcomes:
-                if not outcome.ok:
-                    console.print(
-                        f"  [warning]A setup command exited with code {outcome.returncode}:\n"
-                        f"  [muted]{outcome.command}[/muted]\n"
-                        f"  Some dependencies may be missing. Run the command above manually "
-                        f"to see the full error.[/warning]"
-                    )
-            self._install_ok = all(o.ok for o in outcomes) if outcomes else True
+
+        console.print(f"  Found [bold]{len(subprojects)}[/bold] sub-project(s) inside this repo:")
+        for subdir, results in subprojects:
+            rel = subdir.relative_to(self.project_dir).as_posix()
+            langs = ", ".join(r.language for r in results)
+            if not self._confirm(f"    Set up [bold]{rel}[/bold] ({langs})? [Y/n] "):
+                console.print(f"    [muted]Skipped {rel}.[/muted]")
+                continue
+            for det in results:
+                console.print(f"    Setting up {rel} ([bold]{det.language}[/bold])…")
+                outcomes = version_manager.setup_environment(subdir, det)
+                # A sub-project failure is reported but doesn't block the root
+                # launch — the main app may still run fine.
+                for outcome in outcomes:
+                    if not outcome.ok:
+                        console.print(
+                            f"    [warning]{rel}: a setup command failed (exit {outcome.returncode}). "
+                            f"Run it manually if you need this component.[/warning]"
+                        )
+
+    def _detect_subprojects(self):
+        """Return [(subdir, detections)] for immediate subdirs that are projects."""
+        found = []
+        try:
+            children = sorted(p for p in self.project_dir.iterdir() if p.is_dir())
+        except OSError:
+            return found
+        for child in children:
+            if child.name in self._IGNORE_DIRS or child.name.startswith("."):
+                continue
+            results = detect_stack(child)
+            if results:
+                found.append((child, results))
+        return found
 
     def _try_project_setup(self) -> bool:
         """Offer to run the project's own setup method, if it has one.
