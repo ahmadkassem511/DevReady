@@ -363,6 +363,12 @@ class Engine:
         elif (self.project_dir / "knexfile.js").exists():
             console.print("  Detected Knex — running migrations…")
             run_command(["npx", "knex", "migrate:latest"], cwd=str(self.project_dir), capture=False)
+        elif (self.project_dir / "bin" / "rails").exists() or (self.project_dir / "config" / "database.yml").exists():
+            console.print("  Detected Rails — running db:migrate…")
+            run_command(["bundle", "exec", "rails", "db:migrate"], cwd=str(self.project_dir), capture=False)
+        elif (self.project_dir / "artisan").exists():
+            console.print("  Detected Laravel — running migrate…")
+            run_command(["php", "artisan", "migrate", "--force"], cwd=str(self.project_dir), capture=False)
         else:
             console.print("  [muted]No migration tool detected — skipping.[/muted]")
 
@@ -504,6 +510,35 @@ class Engine:
             if entry:
                 default = 5000 if "Flask" in frameworks else 8000
                 return [py, entry], env_port or default
+
+        # Ruby — Rails serves on 3000; Sinatra defaults to 4567.
+        if (self.project_dir / "Gemfile").exists():
+            if "Rails" in frameworks or (self.project_dir / "bin" / "rails").exists():
+                p = env_port or 3000
+                return ["bundle", "exec", "rails", "server", "-p", str(p)], p
+            entry = self._find_first(["app.rb", "main.rb", "server.rb"])
+            if entry:
+                return ["bundle", "exec", "ruby", entry], env_port or 4567
+
+        # PHP — Laravel's artisan serve, else the built-in server on a docroot.
+        if (self.project_dir / "composer.json").exists():
+            if "Laravel" in frameworks or (self.project_dir / "artisan").exists():
+                p = env_port or 8000
+                return ["php", "artisan", "serve", f"--port={p}"], p
+            docroot = "public" if (self.project_dir / "public").is_dir() else "."
+            if (self.project_dir / "index.php").exists() or docroot == "public":
+                p = env_port or 8000
+                return ["php", "-S", f"localhost:{p}", "-t", docroot], p
+
+        # Go — run the main package. Port is app-defined, so only claim a URL
+        # when .env tells us one (the server otherwise prints its own).
+        if (self.project_dir / "go.mod").exists():
+            if (self.project_dir / "main.go").exists():
+                return ["go", "run", "."], env_port
+
+        # Rust — cargo run. Same port caveat as Go.
+        if (self.project_dir / "Cargo.toml").exists():
+            return ["cargo", "run"], env_port
 
         return None, None
 
@@ -725,7 +760,13 @@ class Engine:
         table.add_column("Status")
 
         # Toolchain availability.
-        for tool in ("python", "pip", "node", "npm", "docker", "git", "pyenv", "nvm"):
+        tools = (
+            "python", "pip", "uv",            # Python toolchain (uv = version manager)
+            "node", "npm", "fnm",             # Node toolchain
+            "cargo", "go", "ruby", "bundle", "php", "composer",  # other ecosystems
+            "docker", "make", "git",          # services / build / vcs
+        )
+        for tool in tools:
             present = command_exists(tool)
             table.add_row(tool, "[success]found[/success]" if present else "[muted]missing[/muted]")
 

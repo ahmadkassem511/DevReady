@@ -372,14 +372,103 @@ def _node_matches(required: str) -> bool:
 
 
 # -----------------------------------------------------------------------------
+# Compiled / other-ecosystem languages
+# -----------------------------------------------------------------------------
+def _toolchain_setup(
+    project_dir: Path,
+    *,
+    language: str,
+    runner: str,
+    install_cmd: List[str],
+    install_hint: str,
+) -> List[CommandResult]:
+    """Shared "install deps with a single command-line tool" setup.
+
+    Used by the Rust/Go/Ruby/PHP setups, which (unlike Python) don't need a
+    virtualenv — their package managers install into a project-local location
+    on their own. If the tool isn't installed we warn with how to get it rather
+    than failing cryptically.
+    """
+    if not command_exists(runner):
+        console.print(
+            f"  [warning]{language} project detected, but '{runner}' isn't installed.\n"
+            f"  Install it ({install_hint}) and re-run, so DevReady can set up dependencies.[/warning]"
+        )
+        return []
+    console.print(f"  Installing {language} dependencies ({' '.join(install_cmd)})…")
+    return [run_command(install_cmd, cwd=str(project_dir), capture=False)]
+
+
+def setup_rust(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+    """Fetch and build a Rust project's dependencies with cargo."""
+    return _toolchain_setup(
+        project_dir,
+        language="Rust",
+        runner="cargo",
+        install_cmd=["cargo", "build"],
+        install_hint="https://rustup.rs",
+    )
+
+
+def setup_go(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+    """Download a Go module's dependencies."""
+    return _toolchain_setup(
+        project_dir,
+        language="Go",
+        runner="go",
+        install_cmd=["go", "mod", "download"],
+        install_hint="https://go.dev/dl/",
+    )
+
+
+def setup_ruby(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+    """Install a Ruby project's gems with Bundler.
+
+    If Bundler itself is missing but RubyGems is present, install it first.
+    """
+    outcomes: List[CommandResult] = []
+    if not command_exists("bundle"):
+        if command_exists("gem"):
+            console.print("  Bundler not found — installing it (gem install bundler)…")
+            outcomes.append(run_command(["gem", "install", "bundler"], cwd=str(project_dir), capture=False))
+        else:
+            console.print(
+                "  [warning]Ruby project detected, but neither 'bundle' nor 'gem' is installed.\n"
+                "  Install Ruby (https://www.ruby-lang.org) and re-run.[/warning]"
+            )
+            return outcomes
+    console.print("  Installing Ruby dependencies (bundle install)…")
+    outcomes.append(run_command(["bundle", "install"], cwd=str(project_dir), capture=False))
+    return outcomes
+
+
+def setup_php(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+    """Install a PHP project's dependencies with Composer."""
+    return _toolchain_setup(
+        project_dir,
+        language="PHP",
+        runner="composer",
+        install_cmd=["composer", "install"],
+        install_hint="https://getcomposer.org",
+    )
+
+
+# -----------------------------------------------------------------------------
 # Dispatcher
 # -----------------------------------------------------------------------------
 def setup_environment(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
     """Route to the correct per-language setup function for a detection result."""
-    if result.language == "Python":
-        return setup_python(project_dir, result)
-    if result.language == "Node.js":
-        return setup_node(project_dir, result)
+    setups = {
+        "Python": setup_python,
+        "Node.js": setup_node,
+        "Rust": setup_rust,
+        "Go": setup_go,
+        "Ruby": setup_ruby,
+        "PHP": setup_php,
+    }
+    setup_fn = setups.get(result.language)
+    if setup_fn:
+        return setup_fn(project_dir, result)
     console.print(f"  [muted]No automated setup for {result.language} yet.[/muted]")
     return []
 

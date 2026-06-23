@@ -73,3 +73,41 @@ def test_polyglot_repo_detects_both(tmp_path):
 
     languages = {r.language for r in results}
     assert languages == {"Python", "Node.js"}
+
+
+def test_rust_detected(tmp_path):
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "x"\nrust-version = "1.74"\n\n[dependencies]\naxum = "0.7"\n'
+    )
+    results = detect_stack(tmp_path)
+    rust = next(r for r in results if r.language == "Rust")
+    assert rust.version == "1.74"
+    assert "Axum" in rust.frameworks
+
+
+def test_go_detected(tmp_path):
+    (tmp_path / "go.mod").write_text(
+        "module example.com/x\n\ngo 1.22\n\nrequire github.com/gin-gonic/gin v1.9.1\n"
+    )
+    results = detect_stack(tmp_path)
+    go = next(r for r in results if r.language == "Go")
+    assert go.version == "1.22"
+    assert "Gin" in go.frameworks
+
+
+def test_ruby_rails_detected(tmp_path):
+    (tmp_path / "Gemfile").write_text('source "https://rubygems.org"\nruby "3.2.2"\ngem "rails", "~> 7.1"\n')
+    results = detect_stack(tmp_path)
+    ruby = next(r for r in results if r.language == "Ruby")
+    assert ruby.version == "3.2.2"
+    assert "Rails" in ruby.frameworks
+
+
+def test_php_laravel_detected(tmp_path):
+    (tmp_path / "composer.json").write_text(
+        '{"require": {"php": "^8.2", "laravel/framework": "^11.0"}}'
+    )
+    results = detect_stack(tmp_path)
+    php = next(r for r in results if r.language == "PHP")
+    assert php.version == "8.2"
+    assert "Laravel" in php.frameworks

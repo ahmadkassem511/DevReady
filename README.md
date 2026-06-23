@@ -176,6 +176,17 @@ API key. Per-project runtime state (the launched server's PID, etc.) lives in
   Celery, Streamlit.
 - **Node.js** — `package.json`; version via `.nvmrc`/`engines.node`;
   frameworks: Next.js, React, Vue, Angular, Express, NestJS, Svelte.
+- **Rust** — `Cargo.toml`; builds with `cargo build`, runs with `cargo run`;
+  frameworks: Actix Web, Rocket, Axum, Warp.
+- **Go** — `go.mod`; deps via `go mod download`, runs `go run .`; frameworks:
+  Gin, Echo, Fiber, chi, Gorilla.
+- **Ruby** — `Gemfile`; deps via `bundle install`; Rails (`rails server`,
+  `db:migrate`) and Sinatra.
+- **PHP** — `composer.json`; deps via `composer install`; Laravel
+  (`artisan serve`, `artisan migrate`) and Symfony/Slim.
+
+Plus any project that ships its own setup (`make`/`task`/`just`/`setup.sh`) or a
+`docker-compose.yml` — DevReady uses those directly.
 
 Adding a new stack is intentionally easy — see
 [Contributing](#contributing--architecture).
@@ -213,6 +224,10 @@ devready/
 │   ├── base.py            #   Detector base class + DetectionResult.
 │   ├── python.py          #   Python detector.
 │   ├── node.py            #   Node detector.
+│   ├── rust.py            #   Rust (Cargo) detector.
+│   ├── go.py              #   Go (go.mod) detector.
+│   ├── ruby.py            #   Ruby (Gemfile) detector.
+│   ├── php.py             #   PHP (composer.json) detector.
 │   └── __init__.py        #   Registry + detect_stack() entry point.
 ├── environment/           # "How do we set it up?"
 │   ├── strategies.py      #   Detect the project's OWN setup method (make/task/just/script).

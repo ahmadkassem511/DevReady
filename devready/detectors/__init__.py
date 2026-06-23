@@ -11,8 +11,12 @@ from pathlib import Path
 from typing import List, Type
 
 from .base import DetectionResult, Detector
+from .go import GoDetector
 from .node import NodeDetector
+from .php import PhpDetector
 from .python import PythonDetector
+from .ruby import RubyDetector
+from .rust import RustDetector
 
 # The ordered list of detectors DevReady runs. Order doesn't strictly matter
 # because results are sorted by confidence, but keeping the most common stacks
@@ -20,6 +24,10 @@ from .python import PythonDetector
 ALL_DETECTORS: List[Type[Detector]] = [
     PythonDetector,
     NodeDetector,
+    GoDetector,
+    RustDetector,
+    RubyDetector,
+    PhpDetector,
 ]
 
 
