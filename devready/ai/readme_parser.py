@@ -29,6 +29,17 @@ from ..utils import console
 # Endpoint for OpenRouter's OpenAI-compatible chat completions API.
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# Free models the parser falls back to (in order) when the user's configured
+# model is unavailable (404 retired) or rate-limited (429). The last entry,
+# "openrouter/free", is OpenRouter's auto-router that picks any available free
+# model — a reliable safety net. Keep these all ":free" so users never pay.
+FALLBACK_MODELS = [
+    "openai/gpt-oss-20b:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "openrouter/free",
+]
+
 # Instruction sent to the model. We are explicit about the exact JSON shape we
 # want so the response is easy and safe to parse.
 SYSTEM_PROMPT = (
@@ -96,58 +107,91 @@ def parse_readme(readme_text: str, config: Config) -> ReadmeInsights:
 # LLM strategy
 # -----------------------------------------------------------------------------
 def _parse_with_llm(readme_text: str, config: Config) -> Optional[ReadmeInsights]:
-    """Ask OpenRouter to extract setup info. Returns None on any failure.
+    """Ask OpenRouter to extract setup info, trying fallback models if needed.
 
-    We import httpx lazily so that the regex-only path has zero import cost and
-    so a missing/old httpx never breaks the offline workflow.
+    Returns None only if *every* candidate model fails, in which case the caller
+    falls back to the offline regex parser. We import httpx lazily so the
+    regex-only path has zero import cost.
+
+    The flow:
+      * Try the user's configured model first.
+      * On 404 (model retired) or 429 (rate-limited), move on to the next free
+        model in FALLBACK_MODELS instead of silently giving up.
+      * Print the real reason for each failure so users aren't left guessing.
     """
     try:
         import httpx
     except ImportError:
+        console.print("[warning]httpx is not installed — skipping AI parsing.[/warning]")
         return None
 
-    # Cap the README size we send. This keeps us inside the free model's
-    # context window and avoids wasting tokens on enormous READMEs.
+    # Cap the README size we send: keeps us inside free context windows and
+    # avoids wasting tokens on enormous files.
     excerpt = readme_text[:12000]
-
-    payload = {
-        "model": config.llm.model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": excerpt},
-        ],
-        # Low temperature -> deterministic, structured output.
-        "temperature": 0.1,
-    }
     headers = {
         "Authorization": f"Bearer {config.llm.api_key}",
         "Content-Type": "application/json",
-        # OpenRouter asks for these to identify the calling app (optional).
+        # OpenRouter uses these to identify the calling app (optional).
         "HTTP-Referer": "https://github.com/ahmadkassem511/DevReady",
         "X-Title": "DevReady",
     }
 
+    # Build the ordered list of models to try: the configured one first, then
+    # any fallbacks not already covered (de-duplicated, order preserved).
+    candidates = [config.llm.model] + [m for m in FALLBACK_MODELS if m != config.llm.model]
+
+    for model in candidates:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": excerpt},
+            ],
+            "temperature": 0.1,  # low -> deterministic, structured output
+        }
+        try:
+            response = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=60)
+        except Exception as exc:  # network error -> not model-specific, stop early
+            console.print(f"[warning]Network error contacting OpenRouter: {exc}[/warning]")
+            return None
+
+        if response.status_code == 200:
+            content = response.json()["choices"][0]["message"]["content"]
+            data = _extract_json(content)
+            if data is None:
+                console.print(f"[muted]  {model} returned unparseable output — trying next model.[/muted]")
+                continue
+            if model != config.llm.model:
+                console.print(f"[muted]  Used fallback model: {model}[/muted]")
+            return ReadmeInsights(
+                commands=_as_str_list(data.get("commands")),
+                system_packages=_as_str_list(data.get("system_packages")),
+                env_vars=_as_str_dict(data.get("env_vars")),
+                db_commands=_as_str_list(data.get("db_commands")),
+                source="llm",
+            )
+
+        # Non-200: explain why and try the next candidate.
+        reason = _error_reason(response)
+        if response.status_code == 404:
+            console.print(f"[muted]  '{model}' is unavailable ({reason}) — trying another free model.[/muted]")
+        elif response.status_code == 429:
+            console.print(f"[muted]  '{model}' is rate-limited right now — trying another free model.[/muted]")
+        elif response.status_code == 401:
+            console.print("[warning]OpenRouter rejected the API key (401). Run 'devready config set llm openrouter' to update it.[/warning]")
+            return None  # key problem won't be fixed by another model
+        else:
+            console.print(f"[muted]  '{model}' failed ({response.status_code}: {reason}) — trying another.[/muted]")
+
+    return None  # every candidate failed
+
+
+def _error_reason(response) -> str:
+    """Extract a short human-readable error message from an OpenRouter response."""
     try:
-        response = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        # OpenRouter mirrors the OpenAI schema: the text lives at
-        # choices[0].message.content.
-        content = response.json()["choices"][0]["message"]["content"]
+        return str(response.json().get("error", {}).get("message", ""))[:120]
     except Exception:
-        # Any network/HTTP/shape error -> let the caller fall back to regex.
-        return None
-
-    data = _extract_json(content)
-    if data is None:
-        return None
-
-    return ReadmeInsights(
-        commands=_as_str_list(data.get("commands")),
-        system_packages=_as_str_list(data.get("system_packages")),
-        env_vars=_as_str_dict(data.get("env_vars")),
-        db_commands=_as_str_list(data.get("db_commands")),
-        source="llm",
-    )
+        return response.text[:120]
 
 
 def _extract_json(text: str) -> Optional[dict]:

@@ -95,8 +95,15 @@ tier so this costs you nothing.
 Want a different free model? Override it:
 
 ```bash
-devready config set llm openrouter --model meta-llama/llama-3.1-8b-instruct:free
+devready config set llm openrouter --model openai/gpt-oss-20b:free
 ```
+
+> **You don't need to pick a model.** DevReady defaults to a working free model
+> and, if it's ever retired or rate-limited, automatically falls back to other
+> free models (ending with OpenRouter's `openrouter/free` auto-router). The
+> `--model` flag is only there if you have a preference. Browse all free models
+> at [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0)
+> — any id ending in `:free` works.
 
 You can also set the key via an environment variable (handy for CI), which
 takes precedence over the stored key:
@@ -133,7 +140,7 @@ DevReady keeps a small config file at `~/.devready/config.json`:
   "llm": {
     "provider": "openrouter",
     "api_key": "sk-or-...",
-    "model": "meta-llama/llama-3.1-8b-instruct:free"
+    "model": "openai/gpt-oss-20b:free"
   }
 }
 ```

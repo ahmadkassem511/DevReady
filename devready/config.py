@@ -26,10 +26,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# The free model we default to. It requires no credit card and is generous
-# enough for parsing README files. Users can override it via:
+# The free model we default to. It requires no credit card and is capable
+# enough for parsing README files. OpenRouter occasionally retires free models
+# or rate-limits them, so the README parser also tries the FALLBACK_MODELS list
+# (see ai/readme_parser.py) before giving up. Users can override the default via:
 #     devready config set llm openrouter --model <model>
-DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
+DEFAULT_MODEL = "openai/gpt-oss-20b:free"
 DEFAULT_PROVIDER = "openrouter"
 
 

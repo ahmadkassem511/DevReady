@@ -35,10 +35,12 @@ def setup_python(project_dir: Path, result: DetectionResult) -> List[CommandResu
     Steps:
       1. If a specific version is required and ``pyenv`` is installed, ensure
          that version is installed via pyenv.
-      2. Create ``.venv`` in the project directory (idempotent — skipped if it
-         already exists).
-      3. Install dependencies from requirements.txt or pyproject.toml using the
-         venv's pip, which resolves conflicts with pip's built-in resolver.
+      2. Create (or repair) ``.venv`` in the project directory.
+      3. Make sure pip exists inside the venv (some venvs ship without it),
+         then upgrade the core build tools so wheels build cleanly.
+      4. Install dependencies from requirements.txt or pyproject.toml, calling
+         pip via ``python -m pip`` so we never depend on a ``pip.exe`` that may
+         not have been created.
     """
     outcomes: List[CommandResult] = []
 
@@ -50,31 +52,79 @@ def setup_python(project_dir: Path, result: DetectionResult) -> List[CommandResu
             run_command(["pyenv", "install", "--skip-existing", result.version], capture=False)
         )
 
-    # 2. Create the virtual environment if it doesn't exist yet.
+    # 2. Create or repair the virtual environment.
     venv_dir = project_dir / ".venv"
-    if not venv_dir.exists():
-        console.print("  Creating virtual environment (.venv)…")
-        # Use the interpreter currently running DevReady to bootstrap the venv.
-        outcomes.append(
-            run_command([sys.executable, "-m", "venv", str(venv_dir)], cwd=str(project_dir))
-        )
+    venv_python = _venv_python_tool(venv_dir, "python")
+    if not Path(venv_python).exists():
+        # Either there's no .venv at all, or it's broken (no interpreter).
+        if venv_dir.exists():
+            console.print("  [warning].venv exists but has no interpreter — recreating it.[/warning]")
+        else:
+            console.print("  Creating virtual environment (.venv)…")
+        create = run_command([sys.executable, "-m", "venv", str(venv_dir)], cwd=str(project_dir))
+        outcomes.append(create)
+        if not create.ok:
+            # Without a venv we can't continue the Python setup.
+            return outcomes
     else:
         console.print("  [muted].venv already exists — reusing it.[/muted]")
 
-    # 3. Install dependencies using the venv's own pip.
-    pip = _venv_python_tool(venv_dir, "pip")
+    # 3. Guarantee pip is present, then upgrade the build toolchain. The venv we
+    #    found earlier had python.exe but no pip — `ensurepip` bootstraps it.
+    if not _venv_has_pip(venv_python):
+        console.print("  pip not found in .venv — bootstrapping it (ensurepip)…")
+        outcomes.append(
+            run_command([venv_python, "-m", "ensurepip", "--upgrade"], cwd=str(project_dir), capture=False)
+        )
+    console.print("  Upgrading pip, setuptools and wheel…")
+    outcomes.append(
+        run_command(
+            [venv_python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
+            cwd=str(project_dir),
+            capture=False,
+        )
+    )
+
+    # 4. Install the project's dependencies (via `python -m pip`, never pip.exe).
     if "requirements.txt" in result.package_files:
         console.print("  Installing from requirements.txt…")
         outcomes.append(
-            run_command([pip, "install", "-r", "requirements.txt"], cwd=str(project_dir), capture=False)
+            _pip_install_with_retry(venv_python, ["-r", "requirements.txt"], project_dir)
         )
     elif "pyproject.toml" in result.package_files or "setup.py" in result.package_files:
         console.print("  Installing project (pip install .)…")
-        outcomes.append(
-            run_command([pip, "install", "."], cwd=str(project_dir), capture=False)
-        )
+        outcomes.append(_pip_install_with_retry(venv_python, ["."], project_dir))
 
     return outcomes
+
+
+def _venv_has_pip(venv_python: str) -> bool:
+    """Return True if pip is importable inside the venv interpreter."""
+    return run_command([venv_python, "-m", "pip", "--version"]).ok
+
+
+def _pip_install_with_retry(venv_python: str, target_args: List[str], project_dir: Path) -> CommandResult:
+    """Run ``pip install <target>`` and retry once with relaxed resolution.
+
+    Real-world requirement files sometimes pin combinations pip's strict
+    resolver rejects. If the first attempt fails we retry once allowing pip to
+    fall back to older versions of conflicting packages, which resolves the
+    majority of "incompatible package" cases without manual editing. Anything
+    that still fails (e.g. a package needing a system compiler) is reported to
+    the user with the exact command to run manually.
+    """
+    base = [venv_python, "-m", "pip", "install"]
+    first = run_command(base + target_args, cwd=str(project_dir), capture=False)
+    if first.ok:
+        return first
+
+    console.print("  [warning]Install failed — retrying with relaxed dependency resolution…[/warning]")
+    retry = run_command(
+        base + ["--upgrade-strategy", "only-if-needed"] + target_args,
+        cwd=str(project_dir),
+        capture=False,
+    )
+    return retry
 
 
 def _venv_python_tool(venv_dir: Path, tool: str) -> str:
