@@ -111,3 +111,27 @@ def test_php_laravel_detected(tmp_path):
     php = next(r for r in results if r.language == "PHP")
     assert php.version == "8.2"
     assert "Laravel" in php.frameworks
+
+
+def test_java_maven_spring_detected(tmp_path):
+    (tmp_path / "pom.xml").write_text(
+        "<project><properties><java.version>17</java.version></properties>"
+        "<dependencies><dependency><groupId>org.springframework.boot</groupId>"
+        "<artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>"
+    )
+    results = detect_stack(tmp_path)
+    java = next(r for r in results if r.language == "Java")
+    assert java.version == "17"
+    assert "Spring Boot" in java.frameworks
+
+
+def test_dotnet_aspnet_detected(tmp_path):
+    (tmp_path / "App.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk.Web">\n'
+        "  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n"
+        "</Project>\n"
+    )
+    results = detect_stack(tmp_path)
+    dotnet = next(r for r in results if r.language == ".NET")
+    assert dotnet.version == "8.0"
+    assert "ASP.NET Core" in dotnet.frameworks

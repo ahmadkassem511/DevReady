@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import List, Type
 
 from .base import DetectionResult, Detector
+from .dotnet import DotnetDetector
 from .go import GoDetector
+from .java import JavaDetector
 from .node import NodeDetector
 from .php import PhpDetector
 from .python import PythonDetector
@@ -28,6 +30,8 @@ ALL_DETECTORS: List[Type[Detector]] = [
     RustDetector,
     RubyDetector,
     PhpDetector,
+    JavaDetector,
+    DotnetDetector,
 ]
 
 

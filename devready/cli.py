@@ -73,6 +73,12 @@ def start(
         Path("."),
         help="Project directory to set up (defaults to the current directory).",
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Non-interactive: accept every prompt's default (unattended setup).",
+    ),
 ) -> None:
     """Detect, set up, and launch the project in PATH."""
     config = Config.load()
@@ -82,7 +88,7 @@ def start(
     if not config.llm.is_configured:
         _show_openrouter_guide()
 
-    Engine(project_dir=path, config=config).start()
+    Engine(project_dir=path, config=config, assume_yes=yes).start()
 
 
 @app.command()

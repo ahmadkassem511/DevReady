@@ -43,16 +43,37 @@ TOTAL_STEPS = 8
 class Engine:
     """Coordinates project detection, setup, and launch for one project dir."""
 
-    def __init__(self, project_dir: Optional[Path] = None, config: Optional[Config] = None):
+    def __init__(
+        self,
+        project_dir: Optional[Path] = None,
+        config: Optional[Config] = None,
+        assume_yes: bool = False,
+    ):
         # Default to the current working directory; resolve to an absolute path
         # so state files and subprocesses behave predictably.
         self.project_dir = (project_dir or Path.cwd()).resolve()
         self.config = config or Config.load()
+        # When True (devready start --yes), proceed through every prompt with the
+        # default answer — fully unattended. The user opted into running
+        # repo-provided setup without per-step confirmation.
+        self.assume_yes = assume_yes
 
         # Populated as the pipeline runs; later steps read these.
         self.detections: List[DetectionResult] = []
         self.insights: ReadmeInsights = ReadmeInsights()
         self._install_ok: bool = True  # set False if a dep-install step fails
+
+    def _confirm(self, prompt: str, default_yes: bool = True) -> bool:
+        """Ask a yes/no question, or auto-answer when running with --yes.
+
+        ``prompt`` should end with the choice hint, e.g. "Proceed? [Y/n] ".
+        """
+        if self.assume_yes:
+            return True
+        answer = console.input(prompt).strip().lower()
+        if default_yes:
+            return answer in ("", "y", "yes")
+        return answer in ("y", "yes")
 
     # =========================================================================
     # Internal state persistence
@@ -214,7 +235,7 @@ class Engine:
         if not packages:
             console.print("  [muted]No system packages required.[/muted]")
             return
-        system_deps.ensure_packages(packages)
+        system_deps.ensure_packages(packages, assume_yes=self.assume_yes)
 
     # -- Step 4: Environment setup -------------------------------------------
     def _step_environment(self) -> None:
@@ -267,10 +288,7 @@ class Engine:
 
         strategy = runnable[0]
         console.print(f"  This project provides its own setup: [bold]{strategy.display}[/bold]")
-        answer = console.input(
-            "  Run the project's setup instead of the default? [Y/n] "
-        ).strip().lower()
-        if answer not in ("", "y", "yes"):
+        if not self._confirm("  Run the project's setup instead of the default? [Y/n] "):
             console.print("  [muted]Skipping it — using DevReady's standard setup instead.[/muted]")
             return False
 
@@ -292,7 +310,7 @@ class Engine:
         env_vars.generate_env_file(
             self.project_dir,
             readme_env_vars=self.insights.env_vars,
-            interactive=True,
+            interactive=not self.assume_yes,  # --yes leaves blanks rather than prompting
         )
 
     # -- Step 6: Docker / service orchestration ------------------------------
@@ -317,8 +335,7 @@ class Engine:
             )
             return
 
-        answer = console.input(f"  Start services from {compose.name}? [Y/n] ").strip().lower()
-        if answer in ("", "y", "yes"):
+        if self._confirm(f"  Start services from {compose.name}? [Y/n] "):
             console.print("  Starting services (docker compose up -d)…")
             # `docker compose` (v2) is preferred; fall back to the hyphenated v1.
             base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
@@ -540,7 +557,33 @@ class Engine:
         if (self.project_dir / "Cargo.toml").exists():
             return ["cargo", "run"], env_port
 
+        # Java — Spring Boot has a conventional run goal/task (port 8080).
+        if "Spring Boot" in frameworks:
+            if (self.project_dir / "pom.xml").exists():
+                return [version_manager.maven_executable(self.project_dir), "spring-boot:run"], env_port or 8080
+            return [version_manager.gradle_executable(self.project_dir), "bootRun"], env_port or 8080
+
+        # .NET — `dotnet run`; ASP.NET defaults to 5000 unless launchSettings says otherwise.
+        if any(d.language == ".NET" for d in self.detections):
+            if "ASP.NET Core" in frameworks:
+                return ["dotnet", "run"], env_port or self._dotnet_port() or 5000
+            return ["dotnet", "run"], env_port
+
         return None, None
+
+    def _dotnet_port(self) -> Optional[int]:
+        """Read the HTTP port from a .NET project's launchSettings.json, if any."""
+        for settings in self.project_dir.glob("**/launchSettings.json"):
+            try:
+                text = settings.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            # applicationUrl like "http://localhost:5165;https://localhost:7165"
+            match = re.search(r"http://localhost:(\d+)", text)
+            if match:
+                return int(match.group(1))
+            break  # only check the first one
+        return None
 
     def _find_first(self, names: List[str]) -> Optional[str]:
         """Return the first of ``names`` that exists in the project, else None."""

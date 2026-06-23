@@ -37,32 +37,82 @@ eight steps:
 | 1. **Detect** | Scans for `package.json`, `requirements.txt`, `pyproject.toml`, etc. to identify languages, frameworks, and required versions. |
 | 2. **Read the README** | Uses a **free** LLM (via OpenRouter) — or an offline parser — to extract install commands, system packages, env vars, and DB steps from the README. |
 | 3. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`choco`, with your permission. Cleans up README-style names (`Node.js 18+` → `nodejs`) and skips language runtimes — those are handled per-project in step 4. |
-| 4. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. Otherwise it does language-native setup: picks the **correct Python version** (reusing an installed one or auto-downloading it with [uv](https://github.com/astral-sh/uv), isolated), builds the project's own `.venv`, and installs dependencies. For Node it uses [fnm](https://github.com/Schniz/fnm)/`nvm` for the required version, then `npm install`. |
+| 4. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. Otherwise it does language-native setup: Python (correct version via [uv](https://github.com/astral-sh/uv) + isolated `.venv` + pip), Node (fnm/nvm + npm), Rust (`cargo build`), Go (`go mod download`), Ruby (`bundle install`), PHP (`composer install`), Java (Maven/Gradle), .NET (`dotnet restore`). |
 | 5. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
 | 6. **Services** | If a `docker-compose.yml` exists (and Docker is running), offers to start the services. |
 | 7. **Migrations** | Detects and runs migrations (Django, Alembic, Knex…). |
 | 8. **Launch** | Picks the right start command for the framework (Streamlit, Django, FastAPI, Flask, or your npm `dev`/`start` script), **waits until the server actually responds**, then prints and opens the URL — e.g. `http://localhost:8501`. For CLI/library/pipeline projects with no web server, it instead shows you how to run it (Makefile targets and README commands). |
 
 Every step is **non-destructive and asks before changing your system** where it
-matters. DevReady is **100% free for end users** — the optional AI uses a free
-model and requires no credit card.
+matters (use `--yes` to accept all prompts for unattended runs). DevReady is
+**100% free for end users** — the optional AI uses a free model and requires no
+credit card.
+
+## How it works (under the hood)
+
+DevReady is a pipeline of small, independent stages, so it's predictable and
+easy to reason about:
+
+1. **Detectors** look at the files in your project (`requirements.txt`,
+   `package.json`, `go.mod`, `pom.xml`, `*.csproj`, …) and report each stack
+   they recognise — its language, frameworks, required runtime version, and the
+   files they matched. A polyglot repo (e.g. a Python API + a Node frontend)
+   reports multiple stacks.
+2. **The README parser** turns the project's prose README into structured setup
+   data (install commands, system packages, env vars, DB steps). It prefers a
+   free LLM via OpenRouter and falls back to a built-in offline regex parser, so
+   it always works — even with no API key and no network.
+3. **The engine** runs the eight steps in order, choosing the right action per
+   stage: it prefers the project's *own* setup method (Makefile/Docker/scripts)
+   when one exists, and otherwise runs the language-native setup, picking the
+   correct runtime version **isolated per project** so nothing leaks between
+   projects or onto your system.
+4. **Launch** resolves a framework-appropriate start command, waits until the
+   server actually accepts connections, and hands you the URL. For CLI/library
+   projects with no server, it tells you how to run them instead.
+5. **State** (the start command, port, and PID) is saved in
+   `<project>/.devready/state.json`, which is what makes `devready run`,
+   `status`, and `stop` instant afterwards.
+
+Two rules hold everywhere: **all side effects go through one safe command
+runner**, and **anything that changes your machine or runs repo-provided code
+asks first** (unless you pass `--yes`).
 
 ## Installation
 
-```bash
-pip install devready
-```
+DevReady itself is a small Python package. **Requires Python ≥ 3.9.** Installing
+it does **not** install your projects' dependencies — it installs the tool that
+sets them up.
 
-> Requires Python ≥ 3.9. Installing DevReady does **not** install your
-> projects' dependencies — it installs the tool that sets them up.
-
-To install from source for development:
+**From source (current recommended way):**
 
 ```bash
 git clone https://github.com/ahmadkassem511/DevReady
-cd devready
-pip install -e ".[dev]"
+cd DevReady
+pip install -e .
 ```
+
+The `-e` (editable) install means a `git pull` updates your installed tool
+instantly — no reinstall needed. Add `".[dev]"` instead of `"."` if you want the
+test tooling too.
+
+**Verify it installed:**
+
+```bash
+devready --version      # e.g. "DevReady 0.5.0"
+devready doctor         # shows which toolchains DevReady can see
+```
+
+> **If `devready` isn't found**, the Python *Scripts* directory isn't on your
+> `PATH`. Either add it (on Windows it's typically
+> `C:\Users\<you>\AppData\Roaming\Python\Python3xx\Scripts`) and open a new
+> terminal, or just use the identical `python -m devready ...` form everywhere.
+
+> **Optional companion tools.** DevReady works without them, but installs more
+> smoothly when present: [`uv`](https://github.com/astral-sh/uv) (auto-manages
+> Python versions — DevReady installs this for you when needed),
+> [`fnm`](https://github.com/Schniz/fnm) (Node versions), and `docker`. Run
+> `devready doctor` to see what you have.
 
 ## Quick start
 
@@ -120,7 +170,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 
 | Command | Description |
 |---------|-------------|
-| `devready start [path]` | Run the full detect → set up → launch pipeline. **Use this the first time** (and after `git pull`). |
+| `devready start [path] [--yes]` | Run the full detect → set up → launch pipeline. **Use this the first time** (and after `git pull`). Add `--yes`/`-y` for an unattended run that accepts every prompt. |
 | `devready run [path]` | **Relaunch a set-up project — fast.** Skips all setup and reuses the saved start command. Use this every day after the first `start`. |
 | `devready status [path]` | Show run state, the saved start command, and the URL. |
 | `devready stop [path]` | Stop the launched server and any started services. |
@@ -184,6 +234,10 @@ API key. Per-project runtime state (the launched server's PID, etc.) lives in
   `db:migrate`) and Sinatra.
 - **PHP** — `composer.json`; deps via `composer install`; Laravel
   (`artisan serve`, `artisan migrate`) and Symfony/Slim.
+- **Java** — `pom.xml` (Maven) / `build.gradle` (Gradle), wrapper-aware; Spring
+  Boot (`spring-boot:run` / `bootRun`), Quarkus, Micronaut.
+- **.NET** — `*.csproj` / `*.sln`; deps via `dotnet restore`, runs `dotnet run`;
+  ASP.NET Core (port read from `launchSettings.json`).
 
 Plus any project that ships its own setup (`make`/`task`/`just`/`setup.sh`) or a
 `docker-compose.yml` — DevReady uses those directly.
@@ -228,6 +282,8 @@ devready/
 │   ├── go.py              #   Go (go.mod) detector.
 │   ├── ruby.py            #   Ruby (Gemfile) detector.
 │   ├── php.py             #   PHP (composer.json) detector.
+│   ├── java.py            #   Java (Maven/Gradle) detector.
+│   ├── dotnet.py          #   .NET (csproj/sln) detector.
 │   └── __init__.py        #   Registry + detect_stack() entry point.
 ├── environment/           # "How do we set it up?"
 │   ├── strategies.py      #   Detect the project's OWN setup method (make/task/just/script).
@@ -266,9 +322,10 @@ offline.
 
 ## Roadmap
 
-- More stacks: Go, Rust, Ruby, PHP.
-- Auto-install a Node version manager (fnm) the way we do uv for Python.
-- `devready start --yes` for fully non-interactive runs.
+- Per-project version auto-install for more runtimes (Go, Ruby, Java) the way
+  uv handles Python.
+- Richer migration detection (Prisma, TypeORM, Flyway, EF Core).
+- A `devready list` overview of all projects DevReady has set up.
 
 ## License
 

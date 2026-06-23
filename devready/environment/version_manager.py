@@ -453,6 +453,64 @@ def setup_php(project_dir: Path, result: DetectionResult) -> List[CommandResult]
     )
 
 
+def maven_executable(project_dir: Path) -> str:
+    """Return the Maven wrapper in the project if present, else system ``mvn``.
+
+    A wrapper (``mvnw``) pins the exact Maven version the project expects, so we
+    prefer it. It lives in the project dir, so we return an absolute path —
+    subprocess won't find a cwd-local script by bare name on Windows.
+    """
+    wrapper = project_dir / ("mvnw.cmd" if sys.platform == "win32" else "mvnw")
+    return str(wrapper) if wrapper.exists() else "mvn"
+
+
+def gradle_executable(project_dir: Path) -> str:
+    """Return the Gradle wrapper in the project if present, else system ``gradle``."""
+    wrapper = project_dir / ("gradlew.bat" if sys.platform == "win32" else "gradlew")
+    return str(wrapper) if wrapper.exists() else "gradle"
+
+
+def _runner_available(executable: str) -> bool:
+    """True if an executable is runnable, whether it's a PATH tool or a wrapper path."""
+    return command_exists(executable) or Path(executable).exists()
+
+
+def setup_java(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+    """Build a Java project's dependencies with Maven or Gradle (wrapper-aware)."""
+    if (project_dir / "pom.xml").exists():
+        exe = maven_executable(project_dir)
+        if not _runner_available(exe):
+            console.print(
+                "  [warning]Java/Maven project detected, but Maven isn't installed.\n"
+                "  Install it (https://maven.apache.org) and re-run.[/warning]"
+            )
+            return []
+        console.print("  Building with Maven (install -DskipTests)…")
+        return [run_command([exe, "install", "-DskipTests"], cwd=str(project_dir), capture=False)]
+
+    # Otherwise it's a Gradle project.
+    exe = gradle_executable(project_dir)
+    if not _runner_available(exe):
+        console.print(
+            "  [warning]Java/Gradle project detected, but Gradle isn't installed.\n"
+            "  Install it (https://gradle.org) and re-run.[/warning]"
+        )
+        return []
+    console.print("  Building with Gradle (build -x test)…")
+    return [run_command([exe, "build", "-x", "test"], cwd=str(project_dir), capture=False)]
+
+
+def setup_dotnet(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+    """Restore a .NET project's dependencies with the dotnet CLI."""
+    return _toolchain_setup(
+        project_dir,
+        language=".NET",
+        runner="dotnet",
+        install_cmd=["dotnet", "restore"],
+        install_hint="https://dotnet.microsoft.com/download",
+    )
+
+
 # -----------------------------------------------------------------------------
 # Dispatcher
 # -----------------------------------------------------------------------------
@@ -465,6 +523,8 @@ def setup_environment(project_dir: Path, result: DetectionResult) -> List[Comman
         "Go": setup_go,
         "Ruby": setup_ruby,
         "PHP": setup_php,
+        "Java": setup_java,
+        ".NET": setup_dotnet,
     }
     setup_fn = setups.get(result.language)
     if setup_fn:
