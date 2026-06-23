@@ -37,7 +37,7 @@ eight steps:
 | 1. **Detect** | Scans for `package.json`, `requirements.txt`, `pyproject.toml`, etc. to identify languages, frameworks, and required versions. |
 | 2. **Read the README** | Uses a **free** LLM (via OpenRouter) — or an offline parser — to extract install commands, system packages, env vars, and DB steps from the README. |
 | 3. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`choco`, with your permission. |
-| 4. **Runtime & deps** | Creates a `.venv` (Python) or runs `npm install` (Node), installing the right runtime version via `pyenv`/`nvm` when available. |
+| 4. **Runtime & deps** | Picks the **correct Python version for this project** (reusing an installed one, or auto-downloading it with [uv](https://github.com/astral-sh/uv) — isolated, no system changes), builds that project's own `.venv`, and installs dependencies. For Node it runs `npm install`, using `nvm` for the required version when available. |
 | 5. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
 | 6. **Services** | If a `docker-compose.yml` exists, offers to start the services. |
 | 7. **Migrations** | Detects and runs migrations (Django, Alembic, Knex…). |
@@ -160,6 +160,24 @@ API key. Per-project runtime state (the launched server's PID, etc.) lives in
 Adding a new stack is intentionally easy — see
 [Contributing](#contributing--architecture).
 
+## Per-project isolation (no version conflicts)
+
+DevReady never changes your system Python or affects other projects. Each
+project gets **two layers of isolation**:
+
+- **Its own `.venv`** — so package versions in project A can't clash with
+  project B.
+- **The Python version it actually needs** — if a project requires Python 3.11
+  but you're on 3.14, DevReady reuses an installed 3.11 if you have one, and
+  otherwise downloads it with [uv](https://github.com/astral-sh/uv) into uv's
+  private cache (no admin rights, no `PATH` changes, no impact on anything
+  else). It then builds that project's `.venv` from the right interpreter — and
+  recreates a mismatched `.venv` automatically.
+
+So you can have a 3.9 project, a 3.11 project, and a 3.12 project side by side,
+and `devready start` does the right thing for each without you managing
+versions by hand.
+
 ## Contributing & architecture
 
 DevReady is built to be edited. The codebase is small and each module has a
@@ -178,7 +196,7 @@ devready/
 │   └── __init__.py        #   Registry + detect_stack() entry point.
 ├── environment/           # "How do we set it up?"
 │   ├── system_deps.py     #   Install OS packages (brew/apt/choco) with consent.
-│   ├── version_manager.py #   Create venvs / run installs (pyenv/nvm aware).
+│   ├── version_manager.py #   Resolve per-project Python version (reuse or uv), create venvs, run installs.
 │   └── env_vars.py        #   Generate a .env with safe dev defaults.
 └── ai/
     └── readme_parser.py   # LLM (OpenRouter) + offline regex fallback. Same output shape.
