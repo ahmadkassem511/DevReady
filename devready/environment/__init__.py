@@ -6,6 +6,6 @@ separate from detection so the "what" (detectors) and the "how" (environment)
 stay decoupled and individually testable.
 """
 
-from . import env_vars, system_deps, version_manager
+from . import env_vars, strategies, system_deps, version_manager
 
-__all__ = ["system_deps", "version_manager", "env_vars"]
+__all__ = ["system_deps", "version_manager", "env_vars", "strategies"]

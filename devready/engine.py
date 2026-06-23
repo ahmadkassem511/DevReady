@@ -27,7 +27,7 @@ from rich.table import Table
 from .ai import ReadmeInsights, parse_readme
 from .config import Config
 from .detectors import DetectionResult, detect_stack
-from .environment import env_vars, system_deps, version_manager
+from .environment import env_vars, strategies, system_deps, version_manager
 from .utils import (
     command_exists,
     console,
@@ -219,6 +219,14 @@ class Engine:
     # -- Step 4: Environment setup -------------------------------------------
     def _step_environment(self) -> None:
         print_step(4, TOTAL_STEPS, "Environment Setup")
+
+        # 4a. Prefer the project's OWN setup method if it ships one (make setup,
+        #     setup.sh, task setup, just setup). It's the authoritative way to
+        #     set the project up — we just ask before running repo-provided code.
+        if self._try_project_setup():
+            return  # the project's own setup ran (or fully handled this step)
+
+        # 4b. Otherwise fall back to DevReady's language-native setup.
         if not self.detections:
             console.print("  [muted]No known stack to set up.[/muted]")
             return
@@ -235,6 +243,48 @@ class Engine:
                         f"to see the full error.[/warning]"
                     )
             self._install_ok = all(o.ok for o in outcomes) if outcomes else True
+
+    def _try_project_setup(self) -> bool:
+        """Offer to run the project's own setup method, if it has one.
+
+        Returns True when a project-provided setup method handled this step
+        (whether it was run or the user explicitly chose to use it). Returns
+        False to fall through to DevReady's language-native setup — either
+        because no method was found, the required tool is missing, or the user
+        declined.
+        """
+        runnable = strategies.available_strategies(self.project_dir)
+        if not runnable:
+            # Detected something but its tool isn't installed? Say so once.
+            detected = strategies.detect_setup_strategies(self.project_dir)
+            if detected:
+                s = detected[0]
+                console.print(
+                    f"  [muted]This project ships a '{s.display}' setup, but '{s.runner}' "
+                    f"isn't installed — using DevReady's standard setup instead.[/muted]"
+                )
+            return False
+
+        strategy = runnable[0]
+        console.print(f"  This project provides its own setup: [bold]{strategy.display}[/bold]")
+        answer = console.input(
+            "  Run the project's setup instead of the default? [Y/n] "
+        ).strip().lower()
+        if answer not in ("", "y", "yes"):
+            console.print("  [muted]Skipping it — using DevReady's standard setup instead.[/muted]")
+            return False
+
+        console.print(f"  Running [bold]{strategy.display}[/bold]…")
+        result = run_command(strategy.command, cwd=str(self.project_dir), capture=False)
+        self._install_ok = result.ok
+        if result.ok:
+            console.print(f"  [success]Project setup completed via {strategy.display}.[/success]")
+        else:
+            console.print(
+                f"  [error]{strategy.display} failed (exit {result.returncode}).[/error] "
+                f"You can run it manually to see the full output."
+            )
+        return True
 
     # -- Step 5: Environment variables ---------------------------------------
     def _step_env_vars(self) -> None:

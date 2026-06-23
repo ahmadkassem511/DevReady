@@ -37,7 +37,7 @@ eight steps:
 | 1. **Detect** | Scans for `package.json`, `requirements.txt`, `pyproject.toml`, etc. to identify languages, frameworks, and required versions. |
 | 2. **Read the README** | Uses a **free** LLM (via OpenRouter) — or an offline parser — to extract install commands, system packages, env vars, and DB steps from the README. |
 | 3. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`choco`, with your permission. Cleans up README-style names (`Node.js 18+` → `nodejs`) and skips language runtimes — those are handled per-project in step 4. |
-| 4. **Runtime & deps** | Picks the **correct Python version for this project** (reusing an installed one, or auto-downloading it with [uv](https://github.com/astral-sh/uv) — isolated, no system changes), builds that project's own `.venv`, and installs dependencies. For Node it uses [fnm](https://github.com/Schniz/fnm)/`nvm` for the required version when available, then runs `npm install`. |
+| 4. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. Otherwise it does language-native setup: picks the **correct Python version** (reusing an installed one or auto-downloading it with [uv](https://github.com/astral-sh/uv), isolated), builds the project's own `.venv`, and installs dependencies. For Node it uses [fnm](https://github.com/Schniz/fnm)/`nvm` for the required version, then `npm install`. |
 | 5. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
 | 6. **Services** | If a `docker-compose.yml` exists (and Docker is running), offers to start the services. |
 | 7. **Migrations** | Detects and runs migrations (Django, Alembic, Knex…). |
@@ -215,6 +215,7 @@ devready/
 │   ├── node.py            #   Node detector.
 │   └── __init__.py        #   Registry + detect_stack() entry point.
 ├── environment/           # "How do we set it up?"
+│   ├── strategies.py      #   Detect the project's OWN setup method (make/task/just/script).
 │   ├── system_deps.py     #   Install OS packages (brew/apt/choco) with consent.
 │   ├── version_manager.py #   Resolve per-project Python version (reuse or uv), create venvs, run installs.
 │   └── env_vars.py        #   Generate a .env with safe dev defaults.
