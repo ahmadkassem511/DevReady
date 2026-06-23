@@ -298,44 +298,77 @@ def _interpreter_version(python_path: str) -> Optional[Tuple[int, int]]:
 # Node.js
 # -----------------------------------------------------------------------------
 def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
-    """Install Node dependencies, optionally installing the right Node first.
+    """Install Node dependencies, ensuring the right Node version when possible.
 
-    Steps:
-      1. If a version is known and ``nvm`` is available, install it. (nvm is a
-         shell function, so we invoke it through the shell.)
-      2. Run the appropriate install command, preferring a clean ``npm ci``
-         when a lockfile is present, otherwise ``npm install``. If the first
-         attempt fails on a peer-dependency conflict, retry with
-         ``--legacy-peer-deps``.
+    Mirrors the Python flow's philosophy of per-project versions:
+      1. If the project needs a specific Node version, try to honour it without
+         touching the global default — via ``fnm`` (modern, runs through
+         ``fnm exec`` so no shell integration is required) or ``nvm`` if present.
+         If neither is installed we warn and proceed with the current Node.
+      2. Install dependencies: ``npm ci`` when a lockfile is present (faster,
+         reproducible), otherwise ``npm install``; retry once with
+         ``--legacy-peer-deps`` if the strict peer resolver rejects the tree.
     """
     outcomes: List[CommandResult] = []
 
-    # 1. Optional: install the required Node version via nvm.
-    if result.version and command_exists("nvm"):
-        console.print(f"  Ensuring Node {result.version} via nvm…")
-        # nvm is sourced into the shell, so we must run it via the shell.
-        outcomes.append(run_command(f"nvm install {result.version}", shell=True, capture=False))
+    # The command prefix used to run npm. When fnm is available and a specific
+    # version is required, we route npm through `fnm exec` so the right Node is
+    # used for THIS project only — the user's default Node is untouched.
+    npm_prefix: List[str] = []
 
-    # 2. Choose install command: `npm ci` is faster/stricter when a lockfile
-    #    exists, but it requires the lockfile to be in sync, so we only use it
-    #    when package-lock.json is present.
+    if result.version:
+        if command_exists("fnm"):
+            console.print(f"  Ensuring Node {result.version} via fnm (isolated to this project)…")
+            outcomes.append(run_command(["fnm", "install", result.version], capture=False))
+            npm_prefix = ["fnm", "exec", "--using", result.version, "--"]
+        elif command_exists("nvm"):
+            console.print(f"  Ensuring Node {result.version} via nvm…")
+            # nvm is a shell function, so it must run through the shell.
+            outcomes.append(run_command(f"nvm install {result.version}", shell=True, capture=False))
+        elif _node_version() and not _node_matches(result.version):
+            console.print(
+                f"  [warning]This project targets Node {result.version} but the installed Node is "
+                f"{_node_version()}. Install fnm (https://github.com/Schniz/fnm) so DevReady can "
+                f"manage Node versions automatically; proceeding with the current Node for now.[/warning]"
+            )
+
+    # 2. Install dependencies.
     has_lockfile = (project_dir / "package-lock.json").exists()
-    install_cmd = ["npm", "ci"] if has_lockfile else ["npm", "install"]
+    install_cmd = npm_prefix + (["npm", "ci"] if has_lockfile else ["npm", "install"])
 
     console.print(f"  Running {' '.join(install_cmd)}…")
     result_cmd = run_command(install_cmd, cwd=str(project_dir), capture=False)
     outcomes.append(result_cmd)
 
-    # Retry with legacy peer deps if the strict resolver rejected the tree.
     if not result_cmd.ok:
         console.print("  [warning]Install failed — retrying with --legacy-peer-deps…[/warning]")
         outcomes.append(
             run_command(
-                ["npm", "install", "--legacy-peer-deps"], cwd=str(project_dir), capture=False
+                npm_prefix + ["npm", "install", "--legacy-peer-deps"],
+                cwd=str(project_dir),
+                capture=False,
             )
         )
 
     return outcomes
+
+
+def _node_version() -> Optional[str]:
+    """Return the installed Node version string (e.g. '20.10.0'), or None."""
+    res = run_command(["node", "--version"])
+    if res.ok:
+        return res.stdout.strip().lstrip("v")
+    return None
+
+
+def _node_matches(required: str) -> bool:
+    """True if the installed Node's major version matches the required one."""
+    installed = _node_version()
+    if not installed:
+        return False
+    req_major = re.match(r"(\d+)", required.strip())
+    inst_major = re.match(r"(\d+)", installed)
+    return bool(req_major and inst_major and req_major.group(1) == inst_major.group(1))
 
 
 # -----------------------------------------------------------------------------

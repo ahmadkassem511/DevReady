@@ -16,10 +16,11 @@ import os
 import re
 import signal
 import subprocess
+import socket
 import time
 import webbrowser
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from rich.table import Table
 
@@ -281,102 +282,167 @@ class Engine:
             )
             return
 
-        start_cmd = self._determine_start_command()
+        start_cmd, port = self._resolve_launch()
         if start_cmd is None:
-            console.print("  [muted]Couldn't determine a start command. Set it up manually.[/muted]")
+            console.print("  [muted]Couldn't determine a start command. Start it manually.[/muted]")
             return
 
         console.print(f"  Launching: [bold]{' '.join(start_cmd)}[/bold]")
+
+        # Redirect the server's output to a log file rather than a PIPE. Reading
+        # a PIPE only on crash risks deadlocking a long-running server once its
+        # output buffer fills; a file never blocks and still lets us show the
+        # error if it crashes.
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._state_dir / "last-run.log"
         try:
-            # Capture stderr so we can show it if the process crashes on startup.
+            log_file = open(log_path, "w", encoding="utf-8", errors="replace")
             process = subprocess.Popen(
                 start_cmd,
                 cwd=str(self.project_dir),
-                stderr=subprocess.PIPE,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
             )
         except (OSError, ValueError) as exc:
             console.print(f"  [error]Failed to launch: {exc}[/error]")
             return
 
-        # Poll for 3 seconds: if the process exits immediately it crashed.
+        # Watch for an early crash (up to ~3s). If the process exits, show the
+        # tail of its log so the user sees the real error immediately.
+        crashed = False
         for _ in range(6):
             time.sleep(0.5)
             if process.poll() is not None:
-                stderr_out = ""
-                try:
-                    stderr_out = (process.stderr.read() or b"").decode(errors="replace").strip()
-                except Exception:
-                    pass
-                console.print(f"  [error]Server exited immediately (code {process.returncode}).[/error]")
-                if stderr_out:
-                    # Show just the last few lines — enough to diagnose the problem.
-                    last_lines = "\n".join(stderr_out.splitlines()[-6:])
-                    console.print(f"  [muted]{last_lines}[/muted]")
-                console.print(
-                    "  [warning]Tip: activate the venv manually and run the command above\n"
-                    "  to see the full traceback:[/warning]\n"
-                    f"  [bold]{' '.join(start_cmd)}[/bold]"
-                )
-                return
-            break  # still running after first half-second — looks good
+                crashed = True
+                break
+        if crashed:
+            console.print(f"  [error]Server exited immediately (code {process.returncode}).[/error]")
+            self._print_log_tail(log_path)
+            console.print(
+                "  [warning]Run the command above manually to see the full traceback. "
+                f"Full log: {log_path}[/warning]"
+            )
+            return
 
-        self._write_state(pid=process.pid, start_command=start_cmd)
+        self._write_state(pid=process.pid, start_command=start_cmd, port=port)
 
-        # Give the server a moment to bind its port, then open the browser.
-        port = self._guess_port()
+        # Wait until the server actually accepts connections, THEN hand over the
+        # URL — so "it's ready" is true, not just hopeful.
+        url = f"http://localhost:{port}" if port else None
         if port:
-            url = f"http://localhost:{port}"
-            console.print(f"  Opening [link={url}]{url}[/link] …")
-            time.sleep(2)
-            try:
-                webbrowser.open(url)
-            except webbrowser.Error:
-                pass
+            console.print(f"  Waiting for the server to come up on port {port}…")
+            if self._wait_for_port(port):
+                console.print(f"  Opening [link={url}]{url}[/link]")
+                try:
+                    webbrowser.open(url)
+                except webbrowser.Error:
+                    pass
+            else:
+                console.print(
+                    f"  [muted]No response on port {port} yet — it may still be starting. "
+                    f"Try {url} in a moment.[/muted]"
+                )
 
-        console.print(
-            "  [success]Project is running.[/success] "
-            "Use [bold]devready stop[/bold] to shut it down."
-        )
+        # Final, prominent hand-off — the one line a "dummy-friendly" tool owes you.
+        if url:
+            console.print(f"\n  [success]✓ Your project is running at[/success] [bold link={url}]{url}[/bold link]")
+        else:
+            console.print("\n  [success]✓ Your project is running.[/success]")
+        console.print("  Stop it anytime with [bold]devready stop[/bold].")
 
-    def _determine_start_command(self) -> Optional[List[str]]:
-        """Work out how to start the app from package.json scripts or framework hints."""
-        # Node: honour the conventional "start" / "dev" npm scripts.
-        package_json = self.project_dir / "package.json"
-        if package_json.exists():
+    def _resolve_launch(self) -> Tuple[Optional[List[str]], Optional[int]]:
+        """Return ``(command, port)`` for starting the project, or ``(None, None)``.
+
+        Picks a framework-appropriate start command and the port its web UI will
+        listen on, so the launch step can open the right URL. The port from a
+        project's ``.env`` always wins over our framework default.
+        """
+        is_python = any(d.language == "Python" for d in self.detections)
+        frameworks = {f for d in self.detections for f in d.frameworks}
+        py = version_manager.python_executable(self.project_dir) or "python"
+        env_port = self._port_from_env()
+
+        # Node: honour the conventional npm scripts.
+        if (self.project_dir / "package.json").exists():
             try:
-                scripts = json.loads(package_json.read_text(encoding="utf-8")).get("scripts", {})
+                scripts = json.loads(
+                    (self.project_dir / "package.json").read_text(encoding="utf-8")
+                ).get("scripts", {})
             except json.JSONDecodeError:
                 scripts = {}
             for script in ("dev", "start", "serve"):
                 if script in scripts:
-                    return ["npm", "run", script]
+                    return ["npm", "run", script], env_port or 3000
 
-        # Python frameworks.
-        py = version_manager.python_executable(self.project_dir) or "python"
-        if (self.project_dir / "manage.py").exists():
-            return [py, "manage.py", "runserver"]
-        # FastAPI/Flask via a conventional app entry point.
-        if any(d.language == "Python" for d in self.detections):
-            if (self.project_dir / "main.py").exists():
-                return [py, "main.py"]
-            if (self.project_dir / "app.py").exists():
-                return [py, "app.py"]
+        if is_python:
+            # Streamlit — this is the user-facing UI, so prefer it. Default 8501.
+            if "Streamlit" in frameworks:
+                entry = self._find_first(
+                    [
+                        "streamlit_app.py", "app.py", "Main.py", "main.py",
+                        "webui/Main.py", "src/Main.py", "src/app.py",
+                    ]
+                )
+                if entry:
+                    p = env_port or 8501
+                    return (
+                        [py, "-m", "streamlit", "run", entry,
+                         "--server.port", str(p), "--server.headless", "true"],
+                        p,
+                    )
 
+            # Django — runserver on 8000.
+            if (self.project_dir / "manage.py").exists():
+                p = env_port or 8000
+                return [py, "manage.py", "runserver", str(p)], p
+
+            # FastAPI / Flask / generic: run the project's own entrypoint, which
+            # typically starts its own server (uvicorn.run / app.run).
+            entry = self._find_first(["main.py", "app.py", "run.py", "server.py"])
+            if entry:
+                default = 5000 if "Flask" in frameworks else 8000
+                return [py, entry], env_port or default
+
+        return None, None
+
+    def _find_first(self, names: List[str]) -> Optional[str]:
+        """Return the first of ``names`` that exists in the project, else None."""
+        for name in names:
+            if (self.project_dir / name).exists():
+                return name
         return None
 
-    def _guess_port(self) -> Optional[int]:
-        """Guess the dev server port from .env or fall back to common defaults."""
+    def _port_from_env(self) -> Optional[int]:
+        """Read a PORT value from the project's .env, if present."""
         env_file = self.project_dir / ".env"
         if env_file.exists():
             match = re.search(r"^PORT=(\d+)", env_file.read_text(encoding="utf-8"), re.MULTILINE)
             if match:
                 return int(match.group(1))
-        # Sensible defaults: Django/Flask 8000, Node 3000.
-        if (self.project_dir / "manage.py").exists():
-            return 8000
-        if (self.project_dir / "package.json").exists():
-            return 3000
         return None
+
+    @staticmethod
+    def _wait_for_port(port: int, timeout: int = 25) -> bool:
+        """Block until ``port`` accepts a TCP connection, or ``timeout`` elapses."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(1)
+                if sock.connect_ex(("127.0.0.1", port)) == 0:
+                    return True
+            time.sleep(0.5)
+        return False
+
+    @staticmethod
+    def _print_log_tail(log_path: Path, lines: int = 8) -> None:
+        """Print the last few lines of the server log to help diagnose a crash."""
+        try:
+            content = log_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return
+        if content:
+            tail = "\n".join(content.splitlines()[-lines:])
+            console.print(f"  [muted]{tail}[/muted]")
 
     # =========================================================================
     # Public command: status
