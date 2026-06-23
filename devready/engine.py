@@ -377,12 +377,7 @@ class Engine:
         if is_python:
             # Streamlit — this is the user-facing UI, so prefer it. Default 8501.
             if "Streamlit" in frameworks:
-                entry = self._find_first(
-                    [
-                        "streamlit_app.py", "app.py", "Main.py", "main.py",
-                        "webui/Main.py", "src/Main.py", "src/app.py",
-                    ]
-                )
+                entry = self._find_streamlit_entry()
                 if entry:
                     p = env_port or 8501
                     return (
@@ -411,6 +406,45 @@ class Engine:
             if (self.project_dir / name).exists():
                 return name
         return None
+
+    def _find_streamlit_entry(self) -> Optional[str]:
+        """Find the file that is actually the Streamlit app.
+
+        Filename alone is unreliable: a project can have a root ``Main.py`` that
+        is a FastAPI backend AND a ``webui/Main.py`` that is the Streamlit UI
+        (e.g. MoneyPrinterTurbo). Running the wrong one gives a blank page. So we
+        pick the first candidate whose source actually imports streamlit, and
+        only fall back to a filename guess if none can be confirmed.
+        """
+        candidates = [
+            "streamlit_app.py", "app.py", "Main.py", "main.py",
+            "webui/Main.py", "webui/app.py", "src/Main.py", "src/app.py",
+            "ui/app.py", "frontend/app.py",
+        ]
+
+        # 1. Prefer a known candidate that genuinely uses Streamlit.
+        for name in candidates:
+            path = self.project_dir / name
+            if path.exists() and self._uses_streamlit(path):
+                return name
+
+        # 2. Otherwise scan the top two directory levels for any Streamlit file.
+        for pattern in ("*.py", "*/*.py"):
+            for path in sorted(self.project_dir.glob(pattern)):
+                if self._uses_streamlit(path):
+                    return path.relative_to(self.project_dir).as_posix()
+
+        # 3. Last resort: first existing candidate, even if unconfirmed.
+        return self._find_first(candidates)
+
+    @staticmethod
+    def _uses_streamlit(path: Path) -> bool:
+        """Return True if a Python file imports Streamlit."""
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        return "import streamlit" in text or "streamlit as st" in text
 
     def _port_from_env(self) -> Optional[int]:
         """Read a PORT value from the project's .env, if present."""
