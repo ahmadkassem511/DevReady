@@ -6,7 +6,8 @@ thin on purpose: each command parses its arguments, then hands off to
 modules, not here — that keeps the commands testable and the CLI readable.
 
 Commands:
-    devready start                      Run the full setup pipeline.
+    devready start                      Run the full setup pipeline, then launch.
+    devready run                        Relaunch an already-set-up project (fast).
     devready status                     Show whether the project is running.
     devready stop                       Stop the running server/services.
     devready clean                      Remove DevReady-managed artifacts.
@@ -82,6 +83,20 @@ def start(
         _show_openrouter_guide()
 
     Engine(project_dir=path, config=config).start()
+
+
+@app.command()
+def run(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Project directory to launch (defaults to the current directory).",
+    ),
+) -> None:
+    """Relaunch an already-set-up project — fast, skips setup.
+
+    Use this for everyday running once ``devready start`` has set the project up.
+    """
+    Engine(project_dir=path).run()
 
 
 @app.command()

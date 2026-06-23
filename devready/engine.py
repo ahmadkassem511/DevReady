@@ -98,6 +98,57 @@ class Engine:
         self._step_migrations()
         self._step_launch()
 
+    # =========================================================================
+    # Public command: run (fast relaunch, no setup)
+    # =========================================================================
+    def run(self) -> None:
+        """Relaunch an already-set-up project without re-running setup.
+
+        Uses the start command saved during the last ``devready start``. This is
+        the everyday "just run my project again" command — instant, because it
+        skips detection, installs, and all the other setup steps.
+
+        If the project was never set up (no saved command), we fall back to
+        detecting a start command on the fly; if even that fails, we point the
+        user at ``devready start``.
+        """
+        print_banner("[bold cyan]DevReady[/bold cyan] — launching your project ▶")
+        console.print(f"[muted]Project: {self.project_dir}[/muted]\n")
+
+        state = self._read_state()
+
+        # If it's already running, don't start a duplicate.
+        pid = state.get("pid")
+        if pid and _pid_alive(pid):
+            port = state.get("port")
+            where = f" at http://localhost:{port}" if port else ""
+            console.print(
+                f"  [success]Already running[/success] (pid {pid}){where}.\n"
+                "  Use [bold]devready stop[/bold] first if you want to restart it."
+            )
+            return
+
+        start_cmd = state.get("start_command")
+        port = state.get("port")
+
+        # No saved command yet — detect one without doing a full setup.
+        if not start_cmd:
+            console.print(
+                "  [muted]No saved launch command — detecting one "
+                "(run [bold]devready start[/bold] for a full setup).[/muted]"
+            )
+            self.detections = detect_stack(self.project_dir)
+            start_cmd, port = self._resolve_launch()
+
+        if not start_cmd:
+            console.print(
+                "  [warning]Couldn't determine how to start this project.\n"
+                "  Run [bold]devready start[/bold] to set it up first.[/warning]"
+            )
+            return
+
+        self._launch(start_cmd, port)
+
     # -- Step 1: Project detection -------------------------------------------
     def _step_detect(self) -> None:
         print_step(1, TOTAL_STEPS, "Project Detection")
@@ -287,6 +338,14 @@ class Engine:
             console.print("  [muted]Couldn't determine a start command. Start it manually.[/muted]")
             return
 
+        self._launch(start_cmd, port)
+
+    def _launch(self, start_cmd: List[str], port: Optional[int]) -> bool:
+        """Spawn the project's server, wait for it, and hand over the URL.
+
+        Shared by ``devready start`` (step 8) and ``devready run`` (relaunch from
+        saved state). Returns True if the server started and stayed up.
+        """
         console.print(f"  Launching: [bold]{' '.join(start_cmd)}[/bold]")
 
         # Redirect the server's output to a log file rather than a PIPE. Reading
@@ -305,7 +364,7 @@ class Engine:
             )
         except (OSError, ValueError) as exc:
             console.print(f"  [error]Failed to launch: {exc}[/error]")
-            return
+            return False
 
         # Watch for an early crash (up to ~3s). If the process exits, show the
         # tail of its log so the user sees the real error immediately.
@@ -322,7 +381,7 @@ class Engine:
                 "  [warning]Run the command above manually to see the full traceback. "
                 f"Full log: {log_path}[/warning]"
             )
-            return
+            return False
 
         self._write_state(pid=process.pid, start_command=start_cmd, port=port)
 
@@ -349,6 +408,7 @@ class Engine:
         else:
             console.print("\n  [success]✓ Your project is running.[/success]")
         console.print("  Stop it anytime with [bold]devready stop[/bold].")
+        return True
 
     def _resolve_launch(self) -> Tuple[Optional[List[str]], Optional[int]]:
         """Return ``(command, port)`` for starting the project, or ``(None, None)``.
@@ -491,14 +551,27 @@ class Engine:
         table.add_column("Value")
         table.add_row("Project", str(self.project_dir))
 
-        if pid and _pid_alive(pid):
+        running = bool(pid and _pid_alive(pid))
+        if running:
             table.add_row("Server", f"[success]running[/success] (pid {pid})")
-            table.add_row("Command", " ".join(state.get("start_command", [])))
         else:
             table.add_row("Server", "[muted]not running[/muted]")
 
+        # Show the saved launch details whether or not it's currently running,
+        # so the user always knows how this project starts and where to reach it.
+        saved_cmd = state.get("start_command")
+        if saved_cmd:
+            table.add_row("Start command", " ".join(saved_cmd))
+        port = state.get("port")
+        if port:
+            table.add_row("URL", f"http://localhost:{port}")
+
         table.add_row("Docker services", "started" if state.get("docker") else "—")
         console.print(table)
+
+        # Friendly hint about the fast relaunch command.
+        if not running and saved_cmd:
+            console.print("\n[muted]Run [bold]devready run[/bold] to relaunch it.[/muted]")
 
     # =========================================================================
     # Public command: stop
