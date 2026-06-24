@@ -77,6 +77,39 @@ def test_project_name_from_url():
     assert project_name_from_url("https://github.com/owner/cool-tool") == "cool-tool"
 
 
+def test_gui_install_uses_the_same_cli_path(tmp_path, monkeypatch):
+    """The GUI must install via `devready start --yes`, not its own logic.
+
+    This is what guarantees the GUI gets the *same* per-project isolation as the
+    CLI (correct Python version + dedicated .venv). We capture the commands the
+    job runs and assert the setup step is exactly the CLI entry point.
+    """
+    import sys
+
+    import devready.web.jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module.Path, "home", lambda: tmp_path)
+
+    recorded = []
+
+    def fake_stream(self, command, job):
+        recorded.append(command)
+        return 0  # pretend clone + setup both succeeded
+
+    monkeypatch.setattr(jobs_module.JobManager, "_stream", fake_stream)
+
+    mgr = jobs_module.JobManager()
+    job = mgr.start_install("https://github.com/owner/repo")
+    # Drain the queue until the job thread finishes.
+    while True:
+        if job.queue.get(timeout=5) is jobs_module._DONE:
+            break
+
+    setup_cmd = recorded[-1]  # last command is the setup invocation
+    assert setup_cmd[:4] == [sys.executable, "-m", "devready", "start"]
+    assert "--yes" in setup_cmd
+
+
 # -- API endpoints (with the security middleware in force) ------------------
 @pytest.fixture
 def client(tmp_path, monkeypatch):
