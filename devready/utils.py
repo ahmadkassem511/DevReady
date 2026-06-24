@@ -76,6 +76,22 @@ class CommandResult:
         return self.returncode == 0
 
 
+def _resolve_windows_executable(command: Sequence[str] | str) -> Sequence[str] | str:
+    """Resolve a bare tool name to its full path on Windows.
+
+    Console tools like ``npm``/``npx``/``yarn``/``pnpm`` are ``.cmd``/``.bat``
+    shims on Windows. Python's ``subprocess`` (without a shell) can't launch them
+    from a bare name — CreateProcess only resolves ``.exe``/``.com``, so
+    ``["npm", "install"]`` raises FileNotFoundError even though npm is installed.
+    Resolving the real path (which honours PATHEXT and finds ``npm.cmd``) makes
+    these run correctly. Harmless for ``.exe`` targets and for absolute paths.
+    """
+    if sys.platform != "win32" or isinstance(command, str) or not command:
+        return command
+    resolved = shutil.which(command[0])
+    return [resolved, *command[1:]] if resolved else command
+
+
 def run_command(
     command: Sequence[str] | str,
     *,
@@ -106,6 +122,9 @@ def run_command(
         caller decides what a failure means in context.
     """
     display = command if isinstance(command, str) else " ".join(command)
+    # On Windows, resolve .cmd/.bat shims (npm, npx, yarn…) to a launchable path.
+    if not shell:
+        command = _resolve_windows_executable(command)
     try:
         completed = subprocess.run(
             command,

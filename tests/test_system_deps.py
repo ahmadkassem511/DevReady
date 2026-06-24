@@ -55,6 +55,28 @@ def test_tool_packages_have_make_mappings():
     assert TOOL_PACKAGES["make"]["apt"] == "make"
 
 
+def test_windows_executable_resolution(monkeypatch):
+    # On Windows, a bare 'npm' must be resolved to its real .cmd path so
+    # subprocess can launch it (CreateProcess won't find a .cmd by bare name).
+    import devready.utils as utils
+
+    monkeypatch.setattr(utils.sys, "platform", "win32")
+    monkeypatch.setattr(utils.shutil, "which", lambda name: r"C:\Program Files\nodejs\npm.CMD" if name == "npm" else None)
+
+    assert utils._resolve_windows_executable(["npm", "install"]) == [r"C:\Program Files\nodejs\npm.CMD", "install"]
+    # Unknown command is left unchanged (so the normal 127 path still applies).
+    assert utils._resolve_windows_executable(["mystery-tool"]) == ["mystery-tool"]
+    # A shell string is never touched.
+    assert utils._resolve_windows_executable("npm install") == "npm install"
+
+
+def test_non_windows_executable_resolution_is_noop(monkeypatch):
+    import devready.utils as utils
+
+    monkeypatch.setattr(utils.sys, "platform", "linux")
+    assert utils._resolve_windows_executable(["npm", "install"]) == ["npm", "install"]
+
+
 def test_node_has_tool_mappings():
     # Node must be auto-installable across the common managers (it bundles npm).
     from devready.environment.system_deps import TOOL_PACKAGES

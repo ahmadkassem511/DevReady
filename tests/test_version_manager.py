@@ -10,10 +10,22 @@ import sys
 
 from devready.environment.version_manager import (
     _interpreter_version,
+    _node_package_manager,
     _parse_version,
     find_installed_python,
     resolve_python_interpreter,
 )
+
+
+def test_node_package_manager_detection(tmp_path):
+    # No lockfile -> npm.
+    assert _node_package_manager(tmp_path) == "npm"
+    # yarn.lock -> yarn.
+    (tmp_path / "yarn.lock").write_text("")
+    assert _node_package_manager(tmp_path) == "yarn"
+    # pnpm-lock.yaml wins (checked first).
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    assert _node_package_manager(tmp_path) == "pnpm"
 
 
 def test_parse_version_major_minor():

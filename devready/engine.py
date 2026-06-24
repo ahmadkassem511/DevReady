@@ -29,6 +29,7 @@ from .config import Config, list_projects, register_project
 from .detectors import DetectionResult, detect_stack
 from .environment import env_vars, strategies, system_deps, version_manager
 from .utils import (
+    _resolve_windows_executable,
     command_exists,
     console,
     print_banner,
@@ -578,7 +579,9 @@ class Engine:
         log_path = self._state_dir / log_name
         try:
             log_file = open(log_path, "w", encoding="utf-8", errors="replace")
-            process = subprocess.Popen(command, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT)
+            # Resolve npm/npx/etc. to a launchable path on Windows (see utils).
+            launch_cmd = _resolve_windows_executable(command)
+            process = subprocess.Popen(launch_cmd, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT)
         except (OSError, ValueError) as exc:
             console.print(f"  [error]Failed to launch{label}: {exc}[/error]")
             return None

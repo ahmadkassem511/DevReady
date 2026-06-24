@@ -24,6 +24,7 @@ we proceed with the current runtime and warn, rather than hard-failing.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
@@ -342,18 +343,41 @@ def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult
                 f"manage Node versions automatically; proceeding with the current Node for now.[/warning]"
             )
 
-    # 2. Install dependencies.
-    has_lockfile = (project_dir / "package-lock.json").exists()
-    install_cmd = npm_prefix + (["npm", "ci"] if has_lockfile else ["npm", "install"])
+    # 2. Install dependencies using the package manager the project actually
+    #    uses — detected from its lockfile. A yarn/pnpm project installed with
+    #    npm often breaks, so honour yarn.lock / pnpm-lock.yaml.
+    pm = _node_package_manager(project_dir)
+
+    # If the project's package manager isn't installed, run it *through* corepack
+    # (bundled with Node 16.10+). `corepack yarn …` provisions the right version
+    # on demand without writing global shims or needing admin rights. We disable
+    # corepack's interactive download prompt so an unattended run never hangs.
+    pm_runner: List[str] = [pm]
+    if pm != "npm" and not command_exists(pm):
+        if command_exists("corepack"):
+            console.print(f"  Provisioning {pm} via corepack…")
+            os.environ.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+            pm_runner = ["corepack", pm]
+        else:
+            console.print(f"  [warning]{pm} isn't available — using npm instead.[/warning]")
+            pm = "npm"
+
+    if pm == "yarn":
+        install_cmd = npm_prefix + pm_runner + ["install"]
+    elif pm == "pnpm":
+        install_cmd = npm_prefix + pm_runner + ["install"]
+    else:
+        has_lockfile = (project_dir / "package-lock.json").exists()
+        install_cmd = npm_prefix + (["npm", "ci"] if has_lockfile else ["npm", "install"])
 
     console.print(f"  Running {' '.join(install_cmd)}…")
     result_cmd = run_command(install_cmd, cwd=str(project_dir), capture=False)
     outcomes.append(result_cmd)
 
     # A peer-dependency conflict is common and fixable; retry once with
-    # --legacy-peer-deps. (Exit 127 means npm itself wasn't found — a different
-    # problem we already tried to solve above — so retrying wouldn't help.)
-    if not result_cmd.ok and result_cmd.returncode != 127:
+    # --legacy-peer-deps (npm only). (Exit 127 means the tool itself wasn't
+    # found — a different problem handled above — so retrying wouldn't help.)
+    if pm == "npm" and not result_cmd.ok and result_cmd.returncode != 127:
         console.print("  [warning]Install failed — retrying with --legacy-peer-deps…[/warning]")
         outcomes.append(
             run_command(
@@ -364,6 +388,15 @@ def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult
         )
 
     return outcomes
+
+
+def _node_package_manager(project_dir: Path) -> str:
+    """Return the Node package manager the project uses, based on its lockfile."""
+    if (project_dir / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (project_dir / "yarn.lock").exists():
+        return "yarn"
+    return "npm"
 
 
 def _node_version() -> Optional[str]:
