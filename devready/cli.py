@@ -25,7 +25,7 @@ from typing import Optional
 import typer
 
 from . import __version__
-from .config import Config
+from .config import Config, openrouter_key_warning
 from .engine import Engine
 from .utils import console, print_banner
 
@@ -200,6 +200,17 @@ def config_set(
     if api_key is None and not config.llm.api_key:
         entered = typer.prompt("OpenRouter API key", hide_input=True, default="", show_default=False)
         api_key = entered or None
+
+    # Catch the common "OpenAI key pasted instead of OpenRouter" mistake. For the
+    # CLI (technical users) we warn and let them override, in case they use a
+    # proxy/gateway with a non-standard key.
+    if provider == "openrouter":
+        warning = openrouter_key_warning(api_key)
+        if warning:
+            console.print(f"[warning]{warning}[/warning]")
+            if not typer.confirm("Save this key anyway?", default=False):
+                console.print("[muted]Cancelled — key not saved.[/muted]")
+                raise typer.Exit(code=1)
 
     config.set_llm(provider, api_key=api_key, model=model)
     console.print(

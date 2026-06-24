@@ -35,6 +35,32 @@ from typing import Any, Dict, List, Optional
 DEFAULT_MODEL = "openai/gpt-oss-20b:free"
 DEFAULT_PROVIDER = "openrouter"
 
+# OpenRouter API keys all start with this prefix (e.g. "sk-or-v1-..."). A very
+# common mistake is pasting an OpenAI key ("sk-proj-..." / "sk-...") instead,
+# which OpenRouter rejects with a 401. We use this to warn early, before a key
+# silently fails mid-setup.
+OPENROUTER_KEY_PREFIX = "sk-or-"
+
+
+def openrouter_key_warning(api_key: Optional[str]) -> Optional[str]:
+    """Return a friendly warning if ``api_key`` doesn't look like an OpenRouter key.
+
+    Returns ``None`` when the key looks valid (or is empty — nothing to warn
+    about). The message is suitable for showing in both the CLI and the GUI.
+    """
+    key = (api_key or "").strip()
+    if not key or key.startswith(OPENROUTER_KEY_PREFIX):
+        return None
+    if key.startswith("sk-"):
+        return (
+            "That looks like an OpenAI key — OpenRouter keys start with 'sk-or-'. "
+            "Get a free one at https://openrouter.ai/keys"
+        )
+    return (
+        "That doesn't look like an OpenRouter key (they start with 'sk-or-'). "
+        "Get a free one at https://openrouter.ai/keys"
+    )
+
 
 def config_dir() -> Path:
     """Return the directory holding DevReady's config (``~/.devready``).

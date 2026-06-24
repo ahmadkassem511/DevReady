@@ -94,6 +94,13 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
         model = (body.get("model") or "").strip() or None
         if not api_key:
             raise HTTPException(status_code=400, detail="An API key is required.")
+        # Catch the common "OpenAI key pasted instead of OpenRouter" mistake
+        # before it silently 401s mid-setup.
+        from ..config import openrouter_key_warning
+
+        warning = openrouter_key_warning(api_key)
+        if warning:
+            raise HTTPException(status_code=400, detail=warning)
         config = Config.load()
         config.set_llm("openrouter", api_key=api_key, model=model)
         return {"ai_configured": True}

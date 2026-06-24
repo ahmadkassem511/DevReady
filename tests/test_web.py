@@ -167,3 +167,14 @@ def test_key_set_and_clear(client):
     assert client.get("/api/state", headers=h).json()["ai_configured"] is True
     assert client.delete("/api/key", headers=h).status_code == 200
     assert client.get("/api/state", headers=h).json()["ai_configured"] is False
+
+
+def test_key_rejects_non_openrouter_key(client):
+    # The GUI must reject an OpenAI key (sk-proj-...) with a helpful 400, and not
+    # save it — this is the exact mistake that caused a silent 401 mid-setup.
+    h = {"X-DevReady-Token": "testtoken"}
+    resp = client.post("/api/key", headers=h, json={"api_key": "sk-proj-abcdef123"})
+    assert resp.status_code == 400
+    assert "sk-or-" in resp.json()["detail"]
+    # Nothing was saved.
+    assert client.get("/api/state", headers=h).json()["ai_configured"] is False

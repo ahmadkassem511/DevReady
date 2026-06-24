@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ..config import Config
+from ..config import Config, openrouter_key_warning
 from ..utils import console
 
 # Endpoints for OpenRouter's OpenAI-compatible API.
@@ -222,10 +222,15 @@ def _try_model(httpx, model: str, excerpt: str, headers: dict, configured_model:
 
     reason = _error_reason(response)
     if response.status_code == 401:
+        # The most common cause is an OpenAI key pasted instead of an OpenRouter
+        # one — surface that hint, since the prefix gives it away.
+        hint = openrouter_key_warning(headers.get("Authorization", "").removeprefix("Bearer ").strip())
         console.print(
             "[warning]OpenRouter rejected the API key (401). "
             "Run 'devready config set llm openrouter' to update it.[/warning]"
         )
+        if hint:
+            console.print(f"[warning]{hint}[/warning]")
         return ("stop", None)
     if response.status_code == 404:
         console.print(f"[muted]  '{model}' is unavailable ({reason}) — trying another free model.[/muted]")

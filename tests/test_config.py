@@ -66,6 +66,20 @@ def test_register_and_list_projects(tmp_path, monkeypatch):
     assert all("last_setup" in p for p in projects)
 
 
+def test_openrouter_key_warning():
+    from devready.config import openrouter_key_warning
+
+    # Valid OpenRouter keys (and empty input) produce no warning.
+    assert openrouter_key_warning("sk-or-v1-abc123") is None
+    assert openrouter_key_warning("") is None
+    assert openrouter_key_warning(None) is None
+    # An OpenAI key is the common mistake — warning should call that out.
+    msg = openrouter_key_warning("sk-proj-abcdef")
+    assert msg is not None and "OpenAI" in msg
+    # Some other non-sk string still warns about the sk-or- prefix.
+    assert openrouter_key_warning("garbage") is not None
+
+
 def test_corrupt_config_falls_back_to_defaults(tmp_path, monkeypatch):
     _redirect_home(tmp_path, monkeypatch)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
