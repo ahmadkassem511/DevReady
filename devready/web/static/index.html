@@ -73,6 +73,9 @@
     .btn:disabled { opacity: .5; cursor: not-allowed; }
     .card .actions { display: flex; gap: 8px; align-items: center; }
     .tag { font-size: 11px; color: var(--accent-2); }
+    .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .card-head h3 { margin: 0; }
+    .stars { color: var(--yellow); font-size: 13px; font-weight: 600; white-space: nowrap; }
     /* modal */
     .overlay {
       position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
@@ -119,7 +122,7 @@
     <!-- DISCOVER -->
     <section id="view-discover">
       <h1>Discover apps</h1>
-      <p class="sub">Browse vetted open-source projects and install one with a click. No setup knowledge needed.</p>
+      <p class="sub">Browse popular open-source projects by category — sorted by GitHub stars — and install one with a click. Start with our hand-picked <b>Featured</b> set, or explore the most-loved projects on GitHub.</p>
 
       <div id="ai-banner" class="banner hidden">
         <span>💡 Optional: add a free AI key so DevReady reads project instructions more accurately.</span>
@@ -184,6 +187,7 @@
         </div>
         <div class="row">
           <button class="btn" id="d-install">Install</button>
+          <button class="btn secondary" id="d-explain">✨ Explain simply</button>
           <button class="btn secondary" onclick="closeOverlay()">Cancel</button>
         </div>
       </div>
@@ -224,50 +228,88 @@
     // --- discover ---
     async function init() {
       const state = await api("/api/state");
-      CATEGORIES = state.categories;
+      CATEGORIES = state.categories;               // "featured" first, then GitHub topics
+      activeCat = CATEGORIES.length ? CATEGORIES[0].id : "featured";
       document.getElementById("ai-banner").classList.toggle("hidden", state.ai_configured);
       const chips = document.getElementById("chips");
-      chips.innerHTML = `<span class="chip active" data-cat="">All</span>` +
-        CATEGORIES.map(c => `<span class="chip" data-cat="${c.id}">${c.label}</span>`).join("");
+      chips.innerHTML = CATEGORIES.map((c, i) =>
+        `<span class="chip${i === 0 ? " active" : ""}" data-cat="${c.id}">${esc(c.label)}</span>`).join("");
       chips.querySelectorAll(".chip").forEach(ch => ch.onclick = () => {
         activeCat = ch.dataset.cat;
         chips.querySelectorAll(".chip").forEach(x => x.classList.remove("active"));
         ch.classList.add("active");
-        loadCatalog();
+        loadDiscover();
       });
-      loadCatalog();
+      loadDiscover();
     }
 
     let searchTimer;
     document.getElementById("search").oninput = () => {
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(loadCatalog, 200);
+      searchTimer = setTimeout(loadDiscover, 350);
     };
 
-    async function loadCatalog() {
-      const q = document.getElementById("search").value;
-      const { projects } = await api(`/api/catalog?q=${encodeURIComponent(q)}&category=${activeCat}`);
-      const grid = document.getElementById("grid");
-      if (!projects.length) { grid.innerHTML = `<div class="empty">No apps match your search.</div>`; return; }
-      grid.innerHTML = projects.map(p => `
+    function fmtStars(n) {
+      if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+      return "" + n;
+    }
+
+    function projectCard(p) {
+      const stars = (typeof p.stars === "number") ? `<span class="stars">★ ${fmtStars(p.stars)}</span>` : "";
+      return `
         <div class="card">
-          <h3>${esc(p.name)}</h3>
+          <div class="card-head"><h3>${esc(p.name)}</h3>${stars}</div>
           <span class="lang">${esc(p.language || "")}</span>
-          <p>${esc(p.description)}</p>
+          <p>${esc(p.description || "No description provided.")}</p>
           <div class="actions">
-            <button class="btn" onclick='openDetail(${JSON.stringify(p).replace(/'/g, "&#39;")})'>View & install</button>
+            <button class="btn" onclick='openDetail(${JSON.stringify(p).replace(/'/g, "&#39;")})'>View &amp; install</button>
           </div>
-        </div>`).join("");
+        </div>`;
+    }
+
+    async function loadDiscover() {
+      const q = document.getElementById("search").value.trim();
+      const grid = document.getElementById("grid");
+      grid.innerHTML = `<div class="empty">Loading…</div>`;
+      let data, isGithub = false;
+      try {
+        if (q) {
+          const cat = activeCat === "featured" ? "" : activeCat;
+          data = await api(`/api/discover?q=${encodeURIComponent(q)}&category=${cat}`); isGithub = true;
+        } else if (activeCat === "featured") {
+          data = await api(`/api/catalog`);
+        } else {
+          data = await api(`/api/discover?category=${activeCat}`); isGithub = true;
+        }
+      } catch (e) { grid.innerHTML = `<div class="empty">✗ ${esc("" + e)}</div>`; return; }
+      if (isGithub && data.error) { grid.innerHTML = `<div class="empty">${esc(data.error)}</div>`; return; }
+      const projects = data.projects || [];
+      if (!projects.length) { grid.innerHTML = `<div class="empty">No projects match your search.</div>`; return; }
+      grid.innerHTML = projects.map(projectCard).join("");
     }
 
     function openDetail(p) {
       selected = p;
       document.getElementById("detail-pane").classList.remove("hidden");
       document.getElementById("install-pane").classList.add("hidden");
+      const stars = (typeof p.stars === "number") ? `  ·  ★ ${fmtStars(p.stars)}` : "";
       document.getElementById("d-name").textContent = p.name;
-      document.getElementById("d-lang").textContent = p.language || "";
-      document.getElementById("d-desc").textContent = p.description;
+      document.getElementById("d-lang").textContent = (p.language || "") + stars;
+      document.getElementById("d-desc").textContent = p.description || "No description provided.";
       document.getElementById("d-install").onclick = () => startInstall(p.repo);
+
+      // "Explain simply": rewrite the description in plain words via the free AI.
+      const ex = document.getElementById("d-explain");
+      ex.textContent = "✨ Explain simply"; ex.disabled = false;
+      ex.onclick = async () => {
+        ex.textContent = "Thinking…"; ex.disabled = true;
+        try {
+          const r = await api("/api/explain", { method: "POST", body: JSON.stringify({ name: p.name, description: p.description }) });
+          document.getElementById("d-desc").textContent = r.text;
+          ex.textContent = r.ai ? "✨ Explained" : "Add an AI key (Settings) to use this";
+        } catch (e) { ex.textContent = "✨ Explain simply"; ex.disabled = false; }
+      };
       document.getElementById("overlay").classList.add("open");
     }
     function closeOverlay() { document.getElementById("overlay").classList.remove("open"); }

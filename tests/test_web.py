@@ -11,8 +11,51 @@ import pytest
 pytest.importorskip("fastapi")
 
 import devready.config as config_module
-from devready.web import catalog, security
+from devready.web import catalog, github, security
 from devready.web.jobs import project_name_from_url, validate_repo_url
+
+
+class _FakeResponse:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def test_build_query():
+    # Featured has no topic query -> default "most-starred overall" floor.
+    assert "stars:>20000" in github.build_query("", "featured")
+    # A category adds its topic and a lower star floor.
+    q = github.build_query("", "ai")
+    assert "topic:machine-learning" in q and "stars:>500" in q
+    # Free text is included.
+    assert github.build_query("chat", "").startswith("chat")
+
+
+def test_search_repositories_maps_and_handles_errors(monkeypatch):
+    sample = {
+        "items": [
+            {
+                "name": "cool-app", "full_name": "owner/cool-app",
+                "clone_url": "https://github.com/owner/cool-app.git",
+                "html_url": "https://github.com/owner/cool-app",
+                "stargazers_count": 45200, "language": "Python",
+                "description": "Does cool things.", "topics": ["ai", "cli"],
+            }
+        ]
+    }
+    monkeypatch.setattr(github.httpx, "get", lambda *a, **k: _FakeResponse(200, sample))
+    projects, error = github.search_repositories(category="ai")
+    assert error == ""
+    assert projects[0]["stars"] == 45200
+    assert projects[0]["repo"] == "https://github.com/owner/cool-app.git"
+
+    # Rate limit -> friendly error, no results.
+    monkeypatch.setattr(github.httpx, "get", lambda *a, **k: _FakeResponse(403))
+    projects, error = github.search_repositories()
+    assert projects == [] and "limit" in error.lower()
 
 
 def _redirect_home(tmp_path, monkeypatch):
@@ -149,6 +192,26 @@ def test_catalog_endpoint(client):
     resp = client.get("/api/catalog?category=ai", headers={"X-DevReady-Token": "testtoken"})
     assert resp.status_code == 200
     assert all(p["category"] == "ai" for p in resp.json()["projects"])
+
+
+def test_discover_endpoint(client, monkeypatch):
+    # Don't hit the network — stub the GitHub search.
+    monkeypatch.setattr(
+        github, "search_repositories",
+        lambda **kw: ([{"name": "x", "stars": 100, "repo": "https://github.com/a/x.git"}], ""),
+    )
+    resp = client.get("/api/discover?category=ai", headers={"X-DevReady-Token": "testtoken"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["projects"][0]["stars"] == 100
+    assert body["error"] == ""
+
+
+def test_state_exposes_discover_categories(client):
+    cats = client.get("/api/state", headers={"X-DevReady-Token": "testtoken"}).json()["categories"]
+    ids = [c["id"] for c in cats]
+    assert ids[0] == "featured"  # curated picks first
+    assert "ai" in ids
 
 
 def test_install_rejects_bad_url(client):

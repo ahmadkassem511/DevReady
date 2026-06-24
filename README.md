@@ -178,8 +178,11 @@ install); after that, everything is point-and-click.
 Double-click the **DevReady** icon. Your browser opens to the DevReady app,
 where you can:
 
-- **Browse a catalog** of vetted projects, or **search by category** (AI, Web
-  apps, Data & tools, Media…).
+- **Browse projects by category** (AI, Web apps, Data & tools, Media, Dev tools,
+  Games…), sorted by **GitHub stars**, or **search** across GitHub. Start from a
+  hand-picked **Featured** set, then explore the most popular projects on GitHub
+  — each shows its star count and a short description (tap **✨ Explain simply**
+  for a plain-language version when you've added a free AI key).
 - Click a project, read what it does, and press **Install** — DevReady clones
   it, sets everything up, and shows a **live progress log** right in the page.
 - When it's ready, click **Open app** to launch it (e.g. `http://localhost:8501`).

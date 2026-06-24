@@ -29,7 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..config import Config, list_projects
-from . import catalog, security
+from . import catalog, github, security
 from .jobs import _DONE, JobManager
 
 _STATIC_DIR = Path(__file__).with_name("static")
@@ -74,17 +74,40 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
     # -- API: configuration & catalog ------------------------------------
     @app.get("/api/state")
     def get_state():
-        """What the GUI needs on load: AI-key status + catalog categories."""
+        """What the GUI needs on load: AI-key status + Discover categories."""
         config = Config.load()
         return {
             "ai_configured": config.llm.is_configured,
             "model": config.llm.model,
-            "categories": catalog.categories(),
+            "categories": github.DISCOVER_CATEGORIES,
         }
 
     @app.get("/api/catalog")
     def get_catalog(q: str = "", category: str = ""):
+        """The curated, vetted picks ('Featured' tab) — safe by default."""
         return {"projects": catalog.search(q, category)}
+
+    @app.get("/api/discover")
+    def discover(q: str = "", category: str = "", page: int = 1):
+        """Browse the most-starred public repos on GitHub by topic/search."""
+        projects, error = github.search_repositories(text=q, category=category, page=page)
+        return {"projects": projects, "error": error, "page": page}
+
+    @app.post("/api/explain")
+    async def explain(request: Request):
+        """Rewrite a project's description in plain language using the free LLM.
+
+        Optional nicety for non-technical users. Falls back to the original text
+        when no (valid) AI key is configured, so it never blocks.
+        """
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        description = (body.get("description") or "").strip()
+        config = Config.load()
+        if not config.llm.is_configured:
+            return {"text": description, "ai": False}
+        simple = _explain_simply(config, name, description)
+        return {"text": simple or description, "ai": bool(simple)}
 
     @app.post("/api/key")
     async def set_key(request: Request):
@@ -231,6 +254,41 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     return app
+
+
+def _explain_simply(config, name: str, description: str) -> str:
+    """Ask the free LLM to rephrase a project's description in plain language.
+
+    Returns a short, jargon-free sentence, or "" on any failure (so the caller
+    falls back to the original description and the GUI never breaks).
+    """
+    import httpx
+
+    from ..ai.readme_parser import OPENROUTER_URL
+
+    prompt = (
+        f"In one short, friendly sentence a non-technical person can understand, "
+        f"explain what the project '{name}' is for. Avoid jargon. "
+        f"Here is its official description: {description or name}"
+    )
+    headers = {
+        "Authorization": f"Bearer {config.llm.api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/ahmadkassem511/DevReady",
+        "X-Title": "DevReady",
+    }
+    payload = {
+        "model": config.llm.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+    }
+    try:
+        resp = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        pass
+    return ""
 
 
 def serve(host: str = "127.0.0.1", port: int = 0, open_browser: bool = True) -> None:
