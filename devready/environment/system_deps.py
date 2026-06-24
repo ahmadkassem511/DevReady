@@ -23,7 +23,7 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from ..utils import (
     CommandResult,
@@ -268,6 +268,43 @@ def _refresh_path(manager: str) -> None:
     refresh_path()
 
 
+def is_elevated() -> bool:
+    """Return True if DevReady is running with admin (Windows) / root (POSIX) rights.
+
+    Used to decide install strategy: choco installs into ``C:\\ProgramData`` and
+    needs admin, so on a normal user account we route around it (winget/scoop/
+    direct download) instead of wasting time on choco's admin prompt and failing.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    try:
+        return os.geteuid() == 0  # type: ignore[attr-defined]
+    except AttributeError:
+        return False
+
+
+# Package managers that write to machine-wide locations and therefore need admin
+# rights on Windows. We try these only when DevReady is elevated; otherwise we
+# prefer the user-scope managers and direct downloads, which never need admin.
+_ADMIN_MANAGERS = {"choco"}
+
+
+def _direct_installer(name: str) -> Optional[Callable[[], bool]]:
+    """Return a no-package-manager, no-admin installer for *name*, if one exists.
+
+    These download a binary straight from the project's releases into a user dir,
+    so they work on a locked-down machine with no package manager at all.
+    """
+    if os.name == "nt" and name == "fnm":
+        return _install_fnm_direct_windows
+    return None
+
+
 def _install_with_manager(name: str, manager: str) -> bool:
     """Try installing *name* with a specific package manager. Returns True on success."""
     pkg = TOOL_PACKAGES.get(name, {}).get(manager, name)
@@ -334,40 +371,87 @@ def _install_fnm_direct_windows() -> bool:
 
 
 def install_tool(name: str) -> bool:
-    """Install a single tool, trying available package managers in order.
+    """Install a single tool, picking a strategy that doesn't need admin if possible.
 
-    On Windows the chain is: choco → winget → scoop (whichever are present).
-    For fnm on Windows a direct GitHub binary download is also attempted as a
-    last resort (no admin, no package manager required).
+    DevReady is meant to "just work" without the user issuing commands, so it
+    chooses the install path intelligently:
 
-    Callers are expected to have already obtained user consent — this function
-    installs silently and returns True when the tool is usable afterwards.
+      * On Windows, when *not* running as administrator, it prefers the
+        user-scope managers (winget, scoop) and direct binary downloads — these
+        never need admin. choco (which writes to ``C:\\ProgramData``) is tried
+        only when DevReady is elevated, so a normal account never wastes time on
+        choco's admin prompt and lock-file failures.
+      * When admin really is the only way to install something, it says so
+        clearly: re-run from an elevated terminal.
+
+    Returns True when the tool is usable afterwards. Callers are expected to have
+    already obtained user consent (DevReady asks once, then installs and
+    continues the setup automatically).
     """
     if command_exists(name):
         return True
 
-    # Build the list of managers to try, primary first.
-    primary = detect_package_manager()
+    elevated = is_elevated()
+
+    # Assemble ordered install strategies. Each returns True on success.
+    strategies: List[tuple[str, Callable[[], bool]]] = []
+
     if os.name == "nt":
-        all_win = ["choco", "winget", "scoop"]
-        managers = [m for m in all_win if command_exists(m)]
-        if primary and primary not in managers:
-            managers.insert(0, primary)
+        present = [m for m in ("winget", "scoop", "choco") if command_exists(m)]
+        # No-admin managers first.
+        for manager in present:
+            if manager not in _ADMIN_MANAGERS:
+                strategies.append((manager, lambda m=manager: _install_with_manager(name, m)))
+        # Direct binary download (no admin, no package manager) — e.g. fnm.
+        direct = _direct_installer(name)
+        if direct:
+            strategies.append(("direct download", direct))
+        # Admin-only managers last, and only when we're actually elevated.
+        for manager in present:
+            if manager in _ADMIN_MANAGERS and elevated:
+                strategies.append((manager, lambda m=manager: _install_with_manager(name, m)))
     else:
-        managers = [primary] if primary else []
+        primary = detect_package_manager()
+        if primary:
+            strategies.append((primary, lambda m=primary: _install_with_manager(name, m)))
+        direct = _direct_installer(name)
+        if direct:
+            strategies.append(("direct download", direct))
 
-    for manager in managers:
-        if _install_with_manager(name, manager):
-            console.print(f"  [success]{name} installed via {manager}.[/success]")
+    for label, attempt in strategies:
+        if attempt():
+            console.print(f"  [success]{name} installed via {label}.[/success]")
             return True
-        console.print(f"  [muted]{manager} failed — trying next option…[/muted]")
+        console.print(f"  [muted]{label} didn't work — trying the next option…[/muted]")
 
-    # Last resort for fnm on Windows: direct binary from GitHub releases.
-    if name == "fnm" and os.name == "nt":
-        if _install_fnm_direct_windows():
-            return command_exists(name)
+    # Nothing worked. Explain the most useful next step, depending on *why*.
+    return _report_install_failure(name, elevated)
 
-    if not managers:
+
+def _report_install_failure(name: str, elevated: bool) -> bool:
+    """Print the most actionable message after every install strategy failed.
+
+    Distinguishes "no package manager at all" from "the only option needs admin",
+    so the user knows exactly what to do. Always returns False.
+    """
+    if os.name == "nt" and not elevated:
+        admin_only = [m for m in _ADMIN_MANAGERS if command_exists(m)]
+        no_admin_options = (
+            any(command_exists(m) for m in ("winget", "scoop"))
+            or _direct_installer(name) is not None
+        )
+        if admin_only and not no_admin_options:
+            console.print(
+                f"  [warning]Installing '{name}' needs administrator rights on this machine "
+                f"(only {', '.join(admin_only)} is available, and it installs system-wide).[/warning]\n"
+                f"  [warning]Please re-run DevReady from an elevated terminal "
+                f"(right-click → 'Run as administrator'), then start again.[/warning]"
+            )
+            return False
+
+    if not any(
+        command_exists(m) for m in ("winget", "scoop", "choco", "brew", "apt", "apt-get", "dnf", "yum", "pacman")
+    ):
         console.print(
             f"  [warning]No supported package manager found to install '{name}'. "
             f"Please install it manually.[/warning]"

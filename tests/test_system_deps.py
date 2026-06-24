@@ -145,44 +145,94 @@ def test_ensure_node_reports_failure(monkeypatch):
     assert sd.ensure_node() is False
 
 
-def test_install_tool_falls_back_to_winget_when_choco_fails(monkeypatch):
-    # When choco is the primary manager but fails, winget should be tried next.
+def test_non_admin_skips_choco_and_uses_winget(monkeypatch):
+    # On a normal (non-admin) Windows account, choco needs admin and should be
+    # skipped entirely — DevReady installs via winget without ever touching choco.
     import devready.environment.system_deps as sd
 
-    # Simulate: both choco and winget are on PATH, but choco fails for fnm.
     available = {"choco", "winget"}
     attempted = []
 
-    monkeypatch.setattr(sd, "command_exists", lambda name: name in available)
-    monkeypatch.setattr(sd, "detect_package_manager", lambda: "choco")
+    monkeypatch.setattr(sd.os, "name", "nt")
+    monkeypatch.setattr(sd, "is_elevated", lambda: False)
 
     def fake_run_command(cmd, **kwargs):
         manager = cmd[0] if isinstance(cmd, list) else cmd.split()[0]
         attempted.append(manager)
         from devready.utils import CommandResult
-        if manager == "choco":
-            return CommandResult(command=cmd, returncode=1, stdout="", stderr="lock file error")
+
         return CommandResult(command=cmd, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(sd, "run_command", fake_run_command)
     monkeypatch.setattr(sd, "_refresh_path", lambda m: None)
 
-    # After winget succeeds, fnm appears on PATH.
-    call_count = {"n": 0}
-    original_command_exists = sd.command_exists
-
     def tracked_exists(name):
         if name == "fnm":
-            # Becomes available after winget runs
-            return "winget" in attempted
+            return "winget" in attempted  # appears after winget runs
         return name in available
 
     monkeypatch.setattr(sd, "command_exists", tracked_exists)
 
-    result = sd.install_tool("fnm")
-    assert result is True
-    assert "choco" in attempted
+    assert sd.install_tool("fnm") is True
     assert "winget" in attempted
+    assert "choco" not in attempted  # never tried — it needs admin
+
+
+def test_elevated_tries_choco_after_user_scope_managers(monkeypatch):
+    # When elevated, choco is allowed — but still after the no-admin managers.
+    import devready.environment.system_deps as sd
+
+    available = {"choco"}  # only choco present this time
+    attempted = []
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    monkeypatch.setattr(sd, "is_elevated", lambda: True)
+
+    def fake_run_command(cmd, **kwargs):
+        manager = cmd[0] if isinstance(cmd, list) else cmd.split()[0]
+        attempted.append(manager)
+        from devready.utils import CommandResult
+
+        return CommandResult(command=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sd, "run_command", fake_run_command)
+    monkeypatch.setattr(sd, "_refresh_path", lambda m: None)
+
+    def tracked_exists(name):
+        if name == "make":
+            return "choco" in attempted
+        return name in available
+
+    monkeypatch.setattr(sd, "command_exists", tracked_exists)
+
+    assert sd.install_tool("make") is True
+    assert "choco" in attempted
+
+
+def test_non_admin_with_only_choco_does_not_attempt_install(monkeypatch):
+    # A tool with no no-admin path, only choco available, not elevated: DevReady
+    # must NOT try choco (it would fail) — it returns False so the caller can
+    # surface the "run as administrator" guidance.
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    monkeypatch.setattr(sd, "is_elevated", lambda: False)
+    # Only choco is present; 'make' has no direct-download installer.
+    monkeypatch.setattr(sd, "command_exists", lambda name: name == "choco")
+
+    ran = {"called": False}
+    monkeypatch.setattr(sd, "run_command", lambda *a, **k: ran.__setitem__("called", True))
+
+    assert sd.install_tool("make") is False
+    assert ran["called"] is False  # choco skipped because not elevated
+
+
+def test_fnm_has_direct_installer_on_windows(monkeypatch):
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    assert sd._direct_installer("fnm") is sd._install_fnm_direct_windows
+    assert sd._direct_installer("make") is None
 
 
 def test_fnm_direct_download_skipped_on_non_windows(monkeypatch):
