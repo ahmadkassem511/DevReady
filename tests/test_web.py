@@ -58,6 +58,20 @@ def test_search_repositories_maps_and_handles_errors(monkeypatch):
     assert projects == [] and "limit" in error.lower()
 
 
+def test_search_results_are_cached(monkeypatch):
+    github._CACHE.clear()
+    calls = {"n": 0}
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _FakeResponse(200, {"items": [{"name": "a", "full_name": "o/a", "stargazers_count": 1}]})
+
+    monkeypatch.setattr(github.httpx, "get", fake_get)
+    github.search_repositories(category="ai")
+    github.search_repositories(category="ai")  # identical query -> served from cache
+    assert calls["n"] == 1
+
+
 def _redirect_home(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module.Path, "home", lambda: tmp_path)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

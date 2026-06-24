@@ -13,11 +13,18 @@ shape the GUI already uses for catalog projects, plus ``stars``.
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Tuple
+import time
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
 GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
+
+# Short-lived in-memory cache of search results, so clicking back to a category
+# (or re-running a search) doesn't spend another request against GitHub's tight
+# unauthenticated rate limit. Keyed by the request params; entries live 10 min.
+_CACHE: Dict[tuple, Tuple[float, List[Dict]]] = {}
+_CACHE_TTL = 600.0
 
 # Discover categories shown as chips in the GUI. "featured" is special (served
 # from the curated catalog); the rest map to a GitHub topic query that surfaces
@@ -54,42 +61,51 @@ def build_query(text: str = "", category: str = "") -> str:
     return " ".join(parts)
 
 
-def _headers() -> Dict[str, str]:
+def _headers(token: Optional[str] = None) -> Dict[str, str]:
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "DevReady"}
-    token = os.environ.get("GITHUB_TOKEN")
+    # A token (from Settings, or the GITHUB_TOKEN env var) raises the search rate
+    # limit from ~10/min (unauthenticated) to 30/min and is strongly recommended.
+    token = token or os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
 def search_repositories(
-    text: str = "", category: str = "", page: int = 1, per_page: int = 30
+    text: str = "", category: str = "", page: int = 1, per_page: int = 30,
+    token: Optional[str] = None,
 ) -> Tuple[List[Dict], str]:
     """Return ``(projects, error)`` for the most-starred repos matching the query.
 
     ``error`` is an empty string on success, or a friendly message (rate limit /
-    network) that the GUI can show. Each project dict matches the catalog shape
-    plus ``stars``, ``html_url`` and ``topics``.
+    network) that the GUI can show. Results are cached for a few minutes so
+    re-browsing a category doesn't spend another request. Each project dict
+    matches the catalog shape plus ``stars``, ``html_url`` and ``topics``.
     """
-    params = {
-        "q": build_query(text, category),
-        "sort": "stars",
-        "order": "desc",
-        "per_page": max(1, min(per_page, 100)),
-        "page": max(1, page),
-    }
+    query = build_query(text, category)
+    per_page = max(1, min(per_page, 100))
+    page = max(1, page)
+
+    cache_key = (query, page, per_page)
+    cached = _CACHE.get(cache_key)
+    if cached and (time.time() - cached[0]) < _CACHE_TTL:
+        return list(cached[1]), ""
+
+    params = {"q": query, "sort": "stars", "order": "desc", "per_page": per_page, "page": page}
     try:
-        resp = httpx.get(GITHUB_SEARCH_URL, params=params, headers=_headers(), timeout=20)
+        resp = httpx.get(GITHUB_SEARCH_URL, params=params, headers=_headers(token), timeout=20)
     except httpx.HTTPError:
         return [], "Couldn't reach GitHub. Check your internet connection and try again."
 
     if resp.status_code == 403:
-        return [], "GitHub's hourly search limit was hit. Try again in a minute (or set a GITHUB_TOKEN)."
+        hint = "" if (token or os.environ.get("GITHUB_TOKEN")) else " Add a free GitHub token in Settings to avoid this."
+        return [], f"GitHub's search rate limit was hit — try again in a minute.{hint}"
     if resp.status_code != 200:
         return [], f"GitHub search failed ({resp.status_code}). Try again shortly."
 
-    items = resp.json().get("items", [])
-    return [_map_repo(it) for it in items], ""
+    projects = [_map_repo(it) for it in resp.json().get("items", [])]
+    _CACHE[cache_key] = (time.time(), projects)
+    return list(projects), ""
 
 
 def _map_repo(item: Dict) -> Dict:

@@ -166,6 +166,21 @@
       </div>
 
       <div class="card" style="max-width:640px; margin-top:18px;">
+        <h3>GitHub token (optional) — smoother Discover browsing</h3>
+        <p class="muted">Discover loads popular projects from GitHub, which limits anonymous searches to about 10 per minute. A free token raises that a lot.</p>
+        <ol class="steps muted">
+          <li>Open <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">github.com/settings/tokens</a> → <b>Generate new token</b> (classic). No scopes needed — read-only public access is enough.</li>
+          <li>Copy it and paste it below. It's stored only on this computer.</li>
+        </ol>
+        <input id="ghtoken" type="password" placeholder="github_pat_... or ghp_..." />
+        <div class="row">
+          <button class="btn" onclick="saveGhToken()">Save token</button>
+          <button class="btn danger" onclick="clearGhToken()">Remove</button>
+          <span id="gh-status" class="muted"></span>
+        </div>
+      </div>
+
+      <div class="card" style="max-width:640px; margin-top:18px;">
         <h3>Advanced: install from a GitHub URL</h3>
         <div class="warn">⚠️ Only do this for repositories you trust. Installing runs the project's own setup on your computer. Vetted apps in <b>Discover</b> are the safe choice.</div>
         <input id="custom-url" type="text" placeholder="https://github.com/owner/repo" />
@@ -439,6 +454,19 @@
     async function refreshKeyStatus() {
       const s = await api("/api/state");
       document.getElementById("key-status").textContent = s.ai_configured ? "✓ A key is saved." : "No key saved yet.";
+      document.getElementById("gh-status").textContent = s.github_configured ? "✓ A token is saved." : "No token saved (using the lower anonymous limit).";
+    }
+    async function saveGhToken() {
+      const token = document.getElementById("ghtoken").value.trim();
+      if (!token) return;
+      try { await api("/api/github-token", { method: "POST", body: JSON.stringify({ token }) });
+        document.getElementById("ghtoken").value = "";
+        refreshKeyStatus();
+      } catch (e) { document.getElementById("gh-status").textContent = "✗ " + e; }
+    }
+    async function clearGhToken() {
+      await api("/api/github-token", { method: "DELETE" });
+      refreshKeyStatus();
     }
     async function saveKey() {
       const key = document.getElementById("apikey").value.trim();

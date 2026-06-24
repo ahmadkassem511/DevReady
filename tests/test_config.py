@@ -80,6 +80,19 @@ def test_openrouter_key_warning():
     assert openrouter_key_warning("garbage") is not None
 
 
+def test_github_token_round_trips(tmp_path, monkeypatch):
+    _redirect_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    config = Config.load()
+    assert config.github_token is None
+    config.set_github_token("ghp_secret123")
+    assert Config.load().github_token == "ghp_secret123"
+    # Clearing it removes it.
+    Config.load().set_github_token(None)
+    assert Config.load().github_token is None
+
+
 def test_unregister_project(tmp_path, monkeypatch):
     _redirect_home(tmp_path, monkeypatch)
     from devready.config import list_projects, register_project, unregister_project

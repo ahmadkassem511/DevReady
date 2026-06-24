@@ -79,6 +79,7 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
         return {
             "ai_configured": config.llm.is_configured,
             "model": config.llm.model,
+            "github_configured": bool(config.github_token),
             "categories": github.DISCOVER_CATEGORIES,
         }
 
@@ -90,8 +91,21 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
     @app.get("/api/discover")
     def discover(q: str = "", category: str = "", page: int = 1):
         """Browse the most-starred public repos on GitHub by topic/search."""
-        projects, error = github.search_repositories(text=q, category=category, page=page)
+        token = Config.load().github_token
+        projects, error = github.search_repositories(text=q, category=category, page=page, token=token)
         return {"projects": projects, "error": error, "page": page}
+
+    @app.post("/api/github-token")
+    async def set_github_token(request: Request):
+        """Store an optional GitHub token to raise the Discover search limit."""
+        body = await request.json()
+        Config.load().set_github_token((body.get("token") or "").strip() or None)
+        return {"github_configured": bool(Config.load().github_token)}
+
+    @app.delete("/api/github-token")
+    def clear_github_token():
+        Config.load().set_github_token(None)
+        return {"github_configured": False}
 
     @app.post("/api/explain")
     async def explain(request: Request):

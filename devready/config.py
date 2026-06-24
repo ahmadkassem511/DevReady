@@ -154,6 +154,9 @@ class Config:
     """In-memory view of DevReady's configuration plus load/save helpers."""
 
     llm: LLMSettings = field(default_factory=LLMSettings)
+    # Optional GitHub token — raises the Discover search rate limit. Never
+    # required; browsing works without it, just with a lower limit.
+    github_token: Optional[str] = None
 
     # -- Loading -------------------------------------------------------------
     @classmethod
@@ -186,7 +189,9 @@ class Config:
         if env_key:
             llm.api_key = env_key
 
-        return cls(llm=llm)
+        github_token = data.get("github", {}).get("token") or os.environ.get("GITHUB_TOKEN")
+
+        return cls(llm=llm, github_token=github_token)
 
     # -- Saving --------------------------------------------------------------
     def save(self) -> None:
@@ -203,7 +208,8 @@ class Config:
                 "provider": self.llm.provider,
                 "api_key": self.llm.api_key,
                 "model": self.llm.model,
-            }
+            },
+            "github": {"token": self.github_token},
         }
         path = config_path()
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -226,4 +232,9 @@ class Config:
             self.llm.api_key = api_key
         if model is not None:
             self.llm.model = model
+        self.save()
+
+    def set_github_token(self, token: Optional[str]) -> None:
+        """Store (or clear) the optional GitHub token and persist it."""
+        self.github_token = token or None
         self.save()
