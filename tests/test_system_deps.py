@@ -143,3 +143,50 @@ def test_ensure_node_reports_failure(monkeypatch):
     monkeypatch.setattr(sd, "command_exists", lambda name: False)
     monkeypatch.setattr(sd, "install_tool", lambda name: False)
     assert sd.ensure_node() is False
+
+
+def test_install_tool_falls_back_to_winget_when_choco_fails(monkeypatch):
+    # When choco is the primary manager but fails, winget should be tried next.
+    import devready.environment.system_deps as sd
+
+    # Simulate: both choco and winget are on PATH, but choco fails for fnm.
+    available = {"choco", "winget"}
+    attempted = []
+
+    monkeypatch.setattr(sd, "command_exists", lambda name: name in available)
+    monkeypatch.setattr(sd, "detect_package_manager", lambda: "choco")
+
+    def fake_run_command(cmd, **kwargs):
+        manager = cmd[0] if isinstance(cmd, list) else cmd.split()[0]
+        attempted.append(manager)
+        from devready.utils import CommandResult
+        if manager == "choco":
+            return CommandResult(command=cmd, returncode=1, stdout="", stderr="lock file error")
+        return CommandResult(command=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sd, "run_command", fake_run_command)
+    monkeypatch.setattr(sd, "_refresh_path", lambda m: None)
+
+    # After winget succeeds, fnm appears on PATH.
+    call_count = {"n": 0}
+    original_command_exists = sd.command_exists
+
+    def tracked_exists(name):
+        if name == "fnm":
+            # Becomes available after winget runs
+            return "winget" in attempted
+        return name in available
+
+    monkeypatch.setattr(sd, "command_exists", tracked_exists)
+
+    result = sd.install_tool("fnm")
+    assert result is True
+    assert "choco" in attempted
+    assert "winget" in attempted
+
+
+def test_fnm_direct_download_skipped_on_non_windows(monkeypatch):
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.os, "name", "posix")
+    assert sd._install_fnm_direct_windows() is False

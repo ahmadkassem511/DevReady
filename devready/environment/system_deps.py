@@ -14,8 +14,14 @@ Design notes for contributors:
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
+import sys
+import tempfile
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -262,41 +268,112 @@ def _refresh_path(manager: str) -> None:
     refresh_path()
 
 
-def install_tool(name: str) -> bool:
-    """Install a single tool via the system package manager. No prompt here.
-
-    Callers are expected to have already gotten the user's consent (DevReady
-    asks once, then installs the tool *and* continues the setup). Returns True
-    when the tool is available afterwards.
-    """
-    if command_exists(name):
-        return True
-
-    manager = detect_package_manager()
-    if manager is None:
-        console.print(
-            f"  [warning]No supported package manager found to install '{name}'. "
-            f"Please install it manually.[/warning]"
-        )
-        return False
-
+def _install_with_manager(name: str, manager: str) -> bool:
+    """Try installing *name* with a specific package manager. Returns True on success."""
     pkg = TOOL_PACKAGES.get(name, {}).get(manager, name)
     command = [part.replace("{pkg}", pkg) for part in INSTALL_TEMPLATES[manager]]
     console.print(f"  Installing [bold]{name}[/bold] via [bold]{manager}[/bold]…")
     result = run_command(command, capture=False)
     if not result.ok:
-        console.print(f"  [error]Failed to install {name} (exit {result.returncode}).[/error]")
+        return False
+    _refresh_path(manager)
+    return command_exists(name)
+
+
+def _install_fnm_direct_windows() -> bool:
+    """Download fnm.exe from GitHub releases — no admin, no package manager required.
+
+    Extracts to ``~/.devready/bin/`` and prepends that directory to PATH so the
+    binary is usable immediately in the current process.
+    """
+    if os.name != "nt":
         return False
 
-    # Make it usable in this same run.
-    _refresh_path(manager)
+    fnm_dir = Path.home() / ".devready" / "bin"
+    fnm_dir.mkdir(parents=True, exist_ok=True)
+    fnm_exe = fnm_dir / "fnm.exe"
+
+    # Prepend our bin dir so shutil.which finds it after extraction.
+    path = os.environ.get("PATH", "")
+    if str(fnm_dir) not in path:
+        os.environ["PATH"] = str(fnm_dir) + os.pathsep + path
+
+    if fnm_exe.exists():
+        return True  # already downloaded in a previous run
+
+    console.print("  Downloading fnm from GitHub releases (no admin required)…")
+    try:
+        api_url = "https://api.github.com/repos/Schniz/fnm/releases/latest"
+        req = urllib.request.Request(api_url, headers={"User-Agent": "devready/1"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+
+        asset_url = next(
+            (a["browser_download_url"] for a in data.get("assets", [])
+             if "windows" in a["name"].lower() and a["name"].endswith(".zip")),
+            None,
+        )
+        if not asset_url:
+            return False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = Path(tmpdir) / "fnm.zip"
+            urllib.request.urlretrieve(asset_url, zip_path)
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(tmpdir)
+            found = next(Path(tmpdir).rglob("fnm.exe"), None)
+            if found:
+                shutil.copy2(found, fnm_exe)
+
+        if fnm_exe.exists():
+            console.print(f"  [success]fnm downloaded to {fnm_dir}.[/success]")
+            return True
+    except Exception as exc:
+        console.print(f"  [warning]Direct fnm download failed: {exc}[/warning]")
+    return False
+
+
+def install_tool(name: str) -> bool:
+    """Install a single tool, trying available package managers in order.
+
+    On Windows the chain is: choco → winget → scoop (whichever are present).
+    For fnm on Windows a direct GitHub binary download is also attempted as a
+    last resort (no admin, no package manager required).
+
+    Callers are expected to have already obtained user consent — this function
+    installs silently and returns True when the tool is usable afterwards.
+    """
     if command_exists(name):
-        console.print(f"  [success]{name} installed.[/success]")
         return True
-    console.print(
-        f"  [warning]{name} was installed but isn't visible yet on PATH. "
-        f"Open a new terminal and re-run [bold]devready start[/bold].[/warning]"
-    )
+
+    # Build the list of managers to try, primary first.
+    primary = detect_package_manager()
+    if os.name == "nt":
+        all_win = ["choco", "winget", "scoop"]
+        managers = [m for m in all_win if command_exists(m)]
+        if primary and primary not in managers:
+            managers.insert(0, primary)
+    else:
+        managers = [primary] if primary else []
+
+    for manager in managers:
+        if _install_with_manager(name, manager):
+            console.print(f"  [success]{name} installed via {manager}.[/success]")
+            return True
+        console.print(f"  [muted]{manager} failed — trying next option…[/muted]")
+
+    # Last resort for fnm on Windows: direct binary from GitHub releases.
+    if name == "fnm" and os.name == "nt":
+        if _install_fnm_direct_windows():
+            return command_exists(name)
+
+    if not managers:
+        console.print(
+            f"  [warning]No supported package manager found to install '{name}'. "
+            f"Please install it manually.[/warning]"
+        )
+    else:
+        console.print(f"  [error]Could not install {name} via any available method.[/error]")
     return False
 
 
