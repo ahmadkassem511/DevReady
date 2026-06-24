@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devready"
-version = "0.8.0"
+version = "0.9.0"
 description = "Set up any cloned project with a single command: devready start"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -49,10 +49,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The non-technical "easy app" experience: a local web GUI (`devready ui`).
+# Kept optional so the core CLI stays lightweight for developers who don't want
+# a web server. The install scripts (for non-technical users) install DevReady
+# with this extra: `pip install "devready[ui]"`.
+ui = [
+    "fastapi>=0.110.0",   # Local API + static hosting for the browser GUI.
+    "uvicorn>=0.27.0",    # ASGI server that runs the FastAPI app on 127.0.0.1.
+]
+
 # Extra packages only needed when developing/testing DevReady itself.
 dev = [
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",
+    "fastapi>=0.110.0",   # so the web layer can be unit-tested
+    "uvicorn>=0.27.0",
 ]
 
 [project.urls]
@@ -69,6 +80,11 @@ devready = "devready.cli:app"
 # Auto-discover the `devready` package (and its sub-packages) but ignore tests.
 include = ["devready*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+# Ship the web GUI's data files (catalog + static assets) inside the wheel —
+# without this, setuptools would package only the .py files.
+"devready.web" = ["catalog.json", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

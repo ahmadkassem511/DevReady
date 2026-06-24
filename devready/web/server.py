@@ -1,0 +1,205 @@
+"""The local web server behind ``devready ui``.
+
+Builds a FastAPI app that serves the browser GUI and a small JSON API. The app
+drives the same :class:`devready.engine.Engine` the CLI uses, so the GUI is just
+a friendlier front door — not a separate codebase.
+
+Everything here is local-only and gated by :mod:`devready.web.security`:
+the security middleware runs before every handler and enforces loopback Host,
+same-origin, and the per-launch token on ``/api`` routes.
+"""
+
+from __future__ import annotations
+
+import json
+import queue
+import webbrowser
+from pathlib import Path
+from typing import Optional
+
+# FastAPI is imported at module level (not lazily inside functions) so that
+# FastAPI can resolve the request/response type hints — with `from __future__
+# import annotations`, hints are strings and must be resolvable from module
+# globals. This module is only ever imported on demand (the `ui` CLI command
+# probes for FastAPI first, and the tests skip when it's absent), so the core
+# CLI still doesn't require FastAPI to be installed.
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from ..config import Config, list_projects
+from . import catalog, security
+from .jobs import _DONE, JobManager
+
+_STATIC_DIR = Path(__file__).with_name("static")
+
+
+def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = None) -> FastAPI:
+    """Build and return the FastAPI app.
+
+    ``token`` defaults to a fresh random token; tests pass a known one. The
+    returned app stores both the token and the job manager on ``app.state``.
+    """
+    app = FastAPI(title="DevReady", docs_url=None, redoc_url=None)
+    app.state.token = token or security.generate_token()
+    app.state.jobs = job_manager or JobManager()
+
+    # -- Security middleware: runs before every request -------------------
+    class SecurityMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            # 1) Host must be loopback (blocks DNS-rebinding via a foreign host).
+            if not security.host_is_allowed(request.headers.get("host")):
+                return JSONResponse({"detail": "Bad host"}, status_code=403)
+            # 2) A present Origin must be same-origin (blocks cross-site scripting our API).
+            if not security.origin_is_allowed(request.headers.get("origin")):
+                return JSONResponse({"detail": "Bad origin"}, status_code=403)
+            # 3) /api routes require the per-launch token (header or ?token=).
+            if request.url.path.startswith("/api"):
+                provided = request.headers.get("x-devready-token") or request.query_params.get("token")
+                if not security.token_matches(app.state.token, provided):
+                    return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+            return await call_next(request)
+
+    app.add_middleware(SecurityMiddleware)
+
+    # -- Pages -------------------------------------------------------------
+    @app.get("/")
+    def index():
+        return FileResponse(_STATIC_DIR / "index.html")
+
+    if _STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    # -- API: configuration & catalog ------------------------------------
+    @app.get("/api/state")
+    def get_state():
+        """What the GUI needs on load: AI-key status + catalog categories."""
+        config = Config.load()
+        return {
+            "ai_configured": config.llm.is_configured,
+            "model": config.llm.model,
+            "categories": catalog.categories(),
+        }
+
+    @app.get("/api/catalog")
+    def get_catalog(q: str = "", category: str = ""):
+        return {"projects": catalog.search(q, category)}
+
+    @app.post("/api/key")
+    async def set_key(request: Request):
+        """Store the OpenRouter API key locally (0600), never logged or echoed."""
+        body = await request.json()
+        api_key = (body.get("api_key") or "").strip()
+        model = (body.get("model") or "").strip() or None
+        if not api_key:
+            raise HTTPException(status_code=400, detail="An API key is required.")
+        config = Config.load()
+        config.set_llm("openrouter", api_key=api_key, model=model)
+        return {"ai_configured": True}
+
+    @app.delete("/api/key")
+    def clear_key():
+        config = Config.load()
+        config.set_llm("openrouter", api_key="", model=config.llm.model)
+        return {"ai_configured": False}
+
+    # -- API: installed projects (the "Library") --------------------------
+    @app.get("/api/projects")
+    def get_projects():
+        from ..engine import Engine, _pid_alive
+
+        out = []
+        for entry in list_projects():
+            path = Path(entry.get("path", ""))
+            if not path.exists():
+                out.append({"path": str(path), "name": path.name, "status": "missing", "urls": []})
+                continue
+            engine = Engine(project_dir=path)
+            procs = engine._state_processes(engine._read_state())
+            running = [p for p in procs if p.get("pid") and _pid_alive(p["pid"])]
+            ports = [p["port"] for p in (running or procs) if p.get("port")]
+            out.append(
+                {
+                    "path": str(path),
+                    "name": path.name,
+                    "status": "running" if running else "stopped",
+                    "urls": [f"http://localhost:{port}" for port in ports],
+                }
+            )
+        return {"projects": out}
+
+    # -- API: install (start a job + stream its log) ----------------------
+    @app.post("/api/install")
+    async def install(request: Request):
+        body = await request.json()
+        repo_url = (body.get("repo_url") or "").strip()
+        try:
+            job = app.state.jobs.start_install(repo_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"job_id": job.id, "name": job.name, "known": catalog.is_known_repo(repo_url)}
+
+    @app.get("/api/install/{job_id}/stream")
+    def install_stream(job_id: str):
+        job = app.state.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Unknown job")
+
+        def event_stream():
+            while True:
+                try:
+                    item = job.queue.get(timeout=1.0)
+                except queue.Empty:
+                    yield ": keep-alive\n\n"  # comment frame keeps the connection open
+                    continue
+                if item is _DONE:
+                    payload = {
+                        "type": "done",
+                        "status": job.status,
+                        "project_dir": job.project_dir,
+                        "urls": job.urls,
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    break
+                yield f"data: {json.dumps({'type': 'log', 'line': item})}\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    return app
+
+
+def serve(host: str = "127.0.0.1", port: int = 0, open_browser: bool = True) -> None:
+    """Launch the web GUI: pick a port, open the browser with the token, run.
+
+    ``port=0`` lets the OS pick a free port — we read it back and open the
+    browser at the exact URL (including the session token).
+    """
+    import socket
+
+    import uvicorn  # local import: only needed when actually serving
+
+    token = security.generate_token()
+    app = create_app(token=token)
+
+    # Reserve a concrete port up front so we can print/open the real URL.
+    if port == 0:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, 0))
+            port = sock.getsockname()[1]
+
+    url = f"http://{host}:{port}/?token={token}"
+
+    from ..utils import console
+
+    console.print("\n[success]DevReady is ready.[/success] Open this in your browser:")
+    console.print(f"  [bold]{url}[/bold]\n")
+    console.print("[muted]Keep this window open while you use DevReady. Press Ctrl+C to stop.[/muted]")
+
+    if open_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass  # headless / no browser — the printed URL still works
+
+    uvicorn.run(app, host=host, port=port, log_level="warning")

@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DevReady</title>
+  <style>
+    :root {
+      --bg: #0d1117; --surface: #161b22; --surface-2: #1c2128;
+      --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+      --accent: #2f81f7; --accent-2: #a371f7; --green: #3fb950;
+      --red: #f85149; --yellow: #d29922; --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+    }
+    a { color: var(--accent); }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 28px; border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; background: var(--bg); z-index: 10;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 20px; }
+    .brand .logo {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    }
+    nav { display: flex; gap: 6px; }
+    nav button {
+      background: transparent; border: 1px solid transparent; color: var(--muted);
+      padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px;
+    }
+    nav button.active { background: var(--surface); color: var(--text); border-color: var(--border); }
+    main { max-width: 1080px; margin: 0 auto; padding: 28px; }
+    h1 { font-size: 26px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 24px; }
+    .banner {
+      display: flex; align-items: center; gap: 12px; background: var(--surface);
+      border: 1px solid var(--border); border-left: 3px solid var(--accent-2);
+      padding: 12px 16px; border-radius: 10px; margin-bottom: 22px; font-size: 14px;
+    }
+    .banner button { margin-left: auto; }
+    .controls { display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+    input[type=text], input[type=password] {
+      background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+      padding: 10px 14px; border-radius: 8px; font-size: 14px; width: 100%;
+    }
+    .search { flex: 1; min-width: 220px; }
+    .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 22px; }
+    .chip {
+      background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+      padding: 6px 14px; border-radius: 999px; cursor: pointer; font-size: 13px;
+    }
+    .chip.active { background: var(--accent); color: white; border-color: var(--accent); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 18px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .card h3 { margin: 0; font-size: 17px; }
+    .card .lang { font-size: 12px; color: var(--muted); }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; flex: 1; }
+    .btn {
+      background: var(--accent); color: white; border: none; padding: 9px 16px;
+      border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600;
+    }
+    .btn:hover { filter: brightness(1.1); }
+    .btn.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+    .btn.danger { background: transparent; color: var(--red); border: 1px solid var(--border); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .card .actions { display: flex; gap: 8px; align-items: center; }
+    .tag { font-size: 11px; color: var(--accent-2); }
+    /* modal */
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+      align-items: center; justify-content: center; padding: 20px; z-index: 50;
+    }
+    .overlay.open { display: flex; }
+    .modal {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      width: 100%; max-width: 720px; max-height: 86vh; overflow: auto; padding: 24px;
+    }
+    .modal h2 { margin-top: 0; }
+    .log {
+      background: #010409; border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-size: 12.5px; white-space: pre-wrap; height: 320px; overflow-y: auto; color: #c9d1d9;
+    }
+    .row { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+    .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+    .dot-running { background: var(--green); } .dot-stopped { background: var(--muted); }
+    .dot-missing { background: var(--red); }
+    .warn {
+      background: rgba(210,153,34,.12); border: 1px solid var(--yellow); color: var(--yellow);
+      padding: 10px 14px; border-radius: 8px; font-size: 13px; margin: 12px 0;
+    }
+    .muted { color: var(--muted); }
+    .steps { font-size: 14px; padding-left: 18px; }
+    .steps li { margin-bottom: 6px; }
+    .hidden { display: none !important; }
+    .empty { text-align: center; color: var(--muted); padding: 60px 0; }
+    code { background: var(--surface-2); padding: 2px 6px; border-radius: 5px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="logo"></span> DevReady</div>
+    <nav>
+      <button data-view="discover" class="active">Discover</button>
+      <button data-view="library">My Apps</button>
+      <button data-view="settings">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- DISCOVER -->
+    <section id="view-discover">
+      <h1>Discover apps</h1>
+      <p class="sub">Browse vetted open-source projects and install one with a click. No setup knowledge needed.</p>
+
+      <div id="ai-banner" class="banner hidden">
+        <span>💡 Optional: add a free AI key so DevReady reads project instructions more accurately.</span>
+        <button class="btn secondary" onclick="showView('settings')">Set it up</button>
+      </div>
+
+      <div class="controls">
+        <input id="search" class="search" type="text" placeholder="Search apps… (e.g. chat, dashboard, python)" />
+      </div>
+      <div id="chips" class="chips"></div>
+      <div id="grid" class="grid"></div>
+    </section>
+
+    <!-- LIBRARY -->
+    <section id="view-library" class="hidden">
+      <h1>My Apps</h1>
+      <p class="sub">Everything you've installed. Open a running app, or start one back up.</p>
+      <div id="library" class="grid"></div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="view-settings" class="hidden">
+      <h1>Settings</h1>
+      <p class="sub">Add a free AI key (optional) so DevReady understands messy project READMEs better.</p>
+
+      <div class="card" style="max-width:640px;">
+        <h3>Free AI parser (OpenRouter)</h3>
+        <p>How to get a free key — takes about a minute, no credit card:</p>
+        <ol class="steps muted">
+          <li>Open <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a> and sign in.</li>
+          <li>Click <b>Create Key</b> and copy it (it starts with <code>sk-or-</code>).</li>
+          <li>Paste it below and click Save. It's stored only on this computer.</li>
+        </ol>
+        <div class="warn">🔒 Your key never leaves your machine except to talk to OpenRouter directly. DevReady has no server and never sees it.</div>
+        <input id="apikey" type="password" placeholder="sk-or-..." />
+        <div class="row">
+          <button class="btn" onclick="saveKey()">Save key</button>
+          <button class="btn danger" onclick="clearKey()">Remove key</button>
+          <span id="key-status" class="muted"></span>
+        </div>
+      </div>
+
+      <div class="card" style="max-width:640px; margin-top:18px;">
+        <h3>Advanced: install from a GitHub URL</h3>
+        <div class="warn">⚠️ Only do this for repositories you trust. Installing runs the project's own setup on your computer. Vetted apps in <b>Discover</b> are the safe choice.</div>
+        <input id="custom-url" type="text" placeholder="https://github.com/owner/repo" />
+        <div class="row"><button class="btn secondary" onclick="installCustom()">Install from URL</button></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- DETAIL / INSTALL MODAL -->
+  <div id="overlay" class="overlay">
+    <div class="modal">
+      <div id="detail-pane">
+        <h2 id="d-name"></h2>
+        <p id="d-lang" class="muted"></p>
+        <p id="d-desc"></p>
+        <div class="warn" id="d-consent">
+          This will: clone the project, install everything it needs (isolated to this app),
+          and start it. Nothing else on your computer is changed.
+        </div>
+        <div class="row">
+          <button class="btn" id="d-install">Install</button>
+          <button class="btn secondary" onclick="closeOverlay()">Cancel</button>
+        </div>
+      </div>
+
+      <div id="install-pane" class="hidden">
+        <h2 id="i-title">Installing…</h2>
+        <div id="log" class="log"></div>
+        <div class="row" id="i-actions">
+          <span id="i-status" class="muted">Working…</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- token (read from the URL the server opened) ---
+    const TOKEN = new URLSearchParams(location.search).get("token") || "";
+    const H = { "X-DevReady-Token": TOKEN, "Content-Type": "application/json" };
+    const api = (path, opts = {}) =>
+      fetch(path, { ...opts, headers: { ...H, ...(opts.headers || {}) } }).then(r => {
+        if (!r.ok) return r.json().then(e => Promise.reject(e.detail || "Error"));
+        return r.json();
+      });
+
+    let CATEGORIES = [], activeCat = "", selected = null;
+
+    function showView(name) {
+      ["discover", "library", "settings"].forEach(v => {
+        document.getElementById("view-" + v).classList.toggle("hidden", v !== name);
+        document.querySelector(`nav button[data-view="${v}"]`).classList.toggle("active", v === name);
+      });
+      if (name === "library") loadLibrary();
+      if (name === "settings") refreshKeyStatus();
+    }
+    document.querySelectorAll("nav button").forEach(b =>
+      b.onclick = () => showView(b.dataset.view));
+
+    // --- discover ---
+    async function init() {
+      const state = await api("/api/state");
+      CATEGORIES = state.categories;
+      document.getElementById("ai-banner").classList.toggle("hidden", state.ai_configured);
+      const chips = document.getElementById("chips");
+      chips.innerHTML = `<span class="chip active" data-cat="">All</span>` +
+        CATEGORIES.map(c => `<span class="chip" data-cat="${c.id}">${c.label}</span>`).join("");
+      chips.querySelectorAll(".chip").forEach(ch => ch.onclick = () => {
+        activeCat = ch.dataset.cat;
+        chips.querySelectorAll(".chip").forEach(x => x.classList.remove("active"));
+        ch.classList.add("active");
+        loadCatalog();
+      });
+      loadCatalog();
+    }
+
+    let searchTimer;
+    document.getElementById("search").oninput = () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(loadCatalog, 200);
+    };
+
+    async function loadCatalog() {
+      const q = document.getElementById("search").value;
+      const { projects } = await api(`/api/catalog?q=${encodeURIComponent(q)}&category=${activeCat}`);
+      const grid = document.getElementById("grid");
+      if (!projects.length) { grid.innerHTML = `<div class="empty">No apps match your search.</div>`; return; }
+      grid.innerHTML = projects.map(p => `
+        <div class="card">
+          <h3>${esc(p.name)}</h3>
+          <span class="lang">${esc(p.language || "")}</span>
+          <p>${esc(p.description)}</p>
+          <div class="actions">
+            <button class="btn" onclick='openDetail(${JSON.stringify(p).replace(/'/g, "&#39;")})'>View & install</button>
+          </div>
+        </div>`).join("");
+    }
+
+    function openDetail(p) {
+      selected = p;
+      document.getElementById("detail-pane").classList.remove("hidden");
+      document.getElementById("install-pane").classList.add("hidden");
+      document.getElementById("d-name").textContent = p.name;
+      document.getElementById("d-lang").textContent = p.language || "";
+      document.getElementById("d-desc").textContent = p.description;
+      document.getElementById("d-install").onclick = () => startInstall(p.repo);
+      document.getElementById("overlay").classList.add("open");
+    }
+    function closeOverlay() { document.getElementById("overlay").classList.remove("open"); }
+
+    // --- install + live log via SSE ---
+    async function startInstall(repoUrl) {
+      document.getElementById("detail-pane").classList.add("hidden");
+      const pane = document.getElementById("install-pane");
+      pane.classList.remove("hidden");
+      document.getElementById("overlay").classList.add("open");
+      const logEl = document.getElementById("log");
+      const statusEl = document.getElementById("i-status");
+      const actions = document.getElementById("i-actions");
+      logEl.textContent = ""; statusEl.textContent = "Starting…";
+      actions.querySelectorAll(".btn").forEach(b => b.remove());
+
+      let resp;
+      try { resp = await api("/api/install", { method: "POST", body: JSON.stringify({ repo_url: repoUrl }) }); }
+      catch (e) { statusEl.textContent = "✗ " + e; return; }
+
+      document.getElementById("i-title").textContent = "Installing " + resp.name;
+      statusEl.textContent = "Working… this can take a few minutes.";
+
+      const es = new EventSource(`/api/install/${resp.job_id}/stream?token=${encodeURIComponent(TOKEN)}`);
+      es.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "log") {
+          logEl.textContent += msg.line + "\n";
+          logEl.scrollTop = logEl.scrollHeight;
+        } else if (msg.type === "done") {
+          es.close();
+          if (msg.status === "success") {
+            statusEl.textContent = "✓ Done!";
+            if (msg.urls && msg.urls.length) {
+              msg.urls.forEach(u => {
+                const a = document.createElement("button");
+                a.className = "btn"; a.textContent = "Open app → " + u;
+                a.onclick = () => window.open(u, "_blank");
+                actions.appendChild(a);
+              });
+            } else {
+              const note = document.createElement("span");
+              note.className = "muted";
+              note.textContent = "Setup complete. This project has no web page to open.";
+              actions.appendChild(note);
+            }
+          } else {
+            statusEl.textContent = "✗ Setup failed — see the log above.";
+          }
+          const close = document.createElement("button");
+          close.className = "btn secondary"; close.textContent = "Close";
+          close.onclick = () => { closeOverlay(); loadLibrary(); };
+          actions.appendChild(close);
+        }
+      };
+      es.onerror = () => { es.close(); statusEl.textContent = "Connection lost."; };
+    }
+
+    function installCustom() {
+      const url = document.getElementById("custom-url").value.trim();
+      if (!url) return;
+      startInstall(url);
+    }
+
+    // --- library ---
+    async function loadLibrary() {
+      const { projects } = await api("/api/projects");
+      const el = document.getElementById("library");
+      if (!projects.length) { el.innerHTML = `<div class="empty">Nothing installed yet. Head to Discover to add your first app.</div>`; return; }
+      el.innerHTML = projects.map(p => `
+        <div class="card">
+          <h3>${esc(p.name)}</h3>
+          <span class="lang"><span class="status-dot dot-${p.status}"></span> ${p.status}</span>
+          <p class="muted">${esc(p.path)}</p>
+          <div class="actions">
+            ${p.urls.map(u => `<button class="btn" onclick="window.open('${u}','_blank')">Open</button>`).join("")}
+          </div>
+        </div>`).join("");
+    }
+
+    // --- settings / key ---
+    async function refreshKeyStatus() {
+      const s = await api("/api/state");
+      document.getElementById("key-status").textContent = s.ai_configured ? "✓ A key is saved." : "No key saved yet.";
+    }
+    async function saveKey() {
+      const key = document.getElementById("apikey").value.trim();
+      if (!key) return;
+      try { await api("/api/key", { method: "POST", body: JSON.stringify({ api_key: key }) });
+        document.getElementById("apikey").value = "";
+        document.getElementById("ai-banner").classList.add("hidden");
+        refreshKeyStatus();
+      } catch (e) { document.getElementById("key-status").textContent = "✗ " + e; }
+    }
+    async function clearKey() {
+      await api("/api/key", { method: "DELETE" });
+      refreshKeyStatus();
+    }
+
+    function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+    init();
+  </script>
+</body>
+</html>

@@ -5,6 +5,12 @@
 *.toml text eol=lf
 *.txt text eol=lf
 *.json text eol=lf
+*.html text eol=lf
+
+# Shell scripts must keep LF or they break on macOS/Linux (`/bin/sh^M`).
+*.sh text eol=lf
+# Windows batch files want CRLF.
+*.bat text eol=crlf
 
 # Binary assets — never touch.
 *.png binary

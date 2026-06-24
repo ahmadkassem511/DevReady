@@ -1,0 +1,65 @@
+{
+  "_comment": "DevReady curated catalog. Every entry here is a project a non-technical user can install with one click, so additions MUST be vetted and ideally CI-tested (try `devready start` on a fresh clone) before being listed. Keep descriptions plain-language. `repo` is the clone URL; `category` groups it in the GUI; `tags` feed search. This file is the SAFE default surface — open GitHub search is a separate, clearly-warned 'advanced' path.",
+  "categories": [
+    { "id": "ai", "label": "AI & LLMs", "icon": "robot" },
+    { "id": "web", "label": "Web Apps", "icon": "globe" },
+    { "id": "data", "label": "Data & Tools", "icon": "chart" },
+    { "id": "media", "label": "Media & Creative", "icon": "film" }
+  ],
+  "projects": [
+    {
+      "id": "open-webui",
+      "name": "Open WebUI",
+      "repo": "https://github.com/open-webui/open-webui",
+      "category": "ai",
+      "language": "Python",
+      "description": "A friendly, self-hosted chat interface for running local AI models (works with Ollama and OpenAI-compatible APIs).",
+      "tags": ["ai", "llm", "chat", "ollama", "interface"]
+    },
+    {
+      "id": "gradio-demo",
+      "name": "Gradio",
+      "repo": "https://github.com/gradio-app/gradio",
+      "category": "ai",
+      "language": "Python",
+      "description": "Build and share machine-learning demos with a web UI in a few lines of Python.",
+      "tags": ["ai", "ml", "demo", "ui"]
+    },
+    {
+      "id": "fastapi",
+      "name": "FastAPI",
+      "repo": "https://github.com/fastapi/fastapi",
+      "category": "web",
+      "language": "Python",
+      "description": "A modern, fast web framework for building APIs with Python. Great starting point for a backend.",
+      "tags": ["web", "api", "backend", "python"]
+    },
+    {
+      "id": "excalidraw",
+      "name": "Excalidraw",
+      "repo": "https://github.com/excalidraw/excalidraw",
+      "category": "web",
+      "language": "TypeScript",
+      "description": "A virtual whiteboard for sketching hand-drawn-style diagrams. Runs entirely in your browser.",
+      "tags": ["web", "drawing", "diagram", "whiteboard"]
+    },
+    {
+      "id": "streamlit",
+      "name": "Streamlit",
+      "repo": "https://github.com/streamlit/streamlit",
+      "category": "data",
+      "language": "Python",
+      "description": "Turn data scripts into shareable web apps in minutes — no front-end experience required.",
+      "tags": ["data", "dashboard", "python", "visualization"]
+    },
+    {
+      "id": "whisper",
+      "name": "Whisper",
+      "repo": "https://github.com/openai/whisper",
+      "category": "media",
+      "language": "Python",
+      "description": "Robust speech-to-text: transcribe audio and video files into text in many languages.",
+      "tags": ["media", "audio", "transcription", "ai"]
+    }
+  ]
+}

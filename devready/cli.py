@@ -142,6 +142,33 @@ def list_projects_cmd() -> None:
     Engine.list_all()
 
 
+@app.command()
+def ui(
+    no_browser: bool = typer.Option(
+        False, "--no-browser", help="Don't auto-open the browser; just print the URL."
+    ),
+) -> None:
+    """Launch the browser GUI — the easy, point-and-click way to use DevReady.
+
+    Starts a small web server on your own machine (127.0.0.1 only) and opens it
+    in your browser. From there you can browse vetted apps and install one with
+    a click — no terminal commands needed. This is the "easy app" experience.
+    """
+    try:
+        import fastapi  # noqa: F401  (probe: the GUI needs these extras)
+        import uvicorn  # noqa: F401
+    except ImportError:
+        console.print(
+            "[error]The web GUI needs a couple of extra packages.[/error]\n"
+            'Install them with:  [bold]pip install "devready[ui]"[/bold]'
+        )
+        raise typer.Exit(code=1)
+
+    from .web.server import serve
+
+    serve(open_browser=not no_browser)
+
+
 # -----------------------------------------------------------------------------
 # config sub-commands
 # -----------------------------------------------------------------------------

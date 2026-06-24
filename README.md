@@ -27,6 +27,22 @@ running — or you've given up.
 
 **DevReady reads the project for you and does all of that automatically.**
 
+## Two ways to use DevReady
+
+DevReady comes in two flavours so it fits both audiences:
+
+| | 🧑‍💻 **For developers (CLI)** | 🚀 **For everyone else (the app)** |
+|---|---|---|
+| **What it is** | The `devready` command in your terminal. | A point-and-click **app with a browser interface**. |
+| **Install** | `pip install -e .` (one line). | Run **`install.sh`** / **`install.bat`** once. |
+| **Daily use** | `devready start` / `devready run`. | Double-click the **DevReady** desktop icon. |
+| **Picking a project** | You `git clone` it yourself. | **Browse a catalog**, search by category, click **Install**. |
+| **Best for** | People comfortable in a terminal. | People who just want the app running — **no terminal knowledge needed**. |
+
+Both run the *same* engine underneath. The easy app is just a friendlier front
+door — see [For non-technical users](#for-non-technical-users--the-easy-app) and
+[For developers](#installation-developers--cli).
+
 ## What it does
 
 When you run `devready start` in a freshly cloned project, it walks through
@@ -78,11 +94,15 @@ Two rules hold everywhere: **all side effects go through one safe command
 runner**, and **anything that changes your machine or runs repo-provided code
 asks first** (unless you pass `--yes`).
 
-## Installation
+## Installation (developers / CLI)
 
 DevReady itself is a small Python package. **Requires Python ≥ 3.9.** Installing
 it does **not** install your projects' dependencies — it installs the tool that
 sets them up.
+
+> 🚀 **Not a developer?** Skip this section — see
+> [For non-technical users](#for-non-technical-users--the-easy-app) for the
+> click-to-install app instead.
 
 **From source (current recommended way):**
 
@@ -93,8 +113,19 @@ pip install -e .
 ```
 
 The `-e` (editable) install means a `git pull` updates your installed tool
-instantly — no reinstall needed. Add `".[dev]"` instead of `"."` if you want the
-test tooling too.
+instantly — no reinstall needed. Add `".[dev]"` for the test tooling, or
+`".[ui]"` if you also want the browser GUI (`devready ui`).
+
+**Optional but recommended — set up the free AI parser during install:**
+
+```bash
+devready config set llm openrouter   # paste your free OpenRouter key (hidden)
+```
+
+This is optional (DevReady falls back to an offline parser), but it makes
+reading messy READMEs noticeably more reliable. See
+[Enabling the free AI parser](#enabling-the-free-ai-parser-optional-recommended)
+for how to get a free key in three steps.
 
 **Verify it installed:**
 
@@ -124,6 +155,47 @@ devready start
 
 That's it. DevReady prints a detection summary, walks the eight steps, and
 launches the app.
+
+## For non-technical users — the easy app
+
+If you're not comfortable with a terminal, DevReady has a **click-to-install
+app** with a friendly browser interface. You touch the terminal **once** (to
+install); after that, everything is point-and-click.
+
+### Install it (one time)
+
+1. Download this repository (green **Code → Download ZIP** button) and unzip it.
+2. Open the `scripts` folder and run the installer for your system:
+   - **Windows:** double-click **`install.bat`**
+   - **macOS / Linux:** open a terminal in that folder and run `sh install.sh`
+3. That's the only terminal step. The installer sets everything up for you
+   (it even installs Python behind the scenes via [`uv`](https://github.com/astral-sh/uv) —
+   you don't need anything beforehand) and puts a **DevReady** icon on your
+   desktop.
+
+### Use it (every time after)
+
+Double-click the **DevReady** icon. Your browser opens to the DevReady app,
+where you can:
+
+- **Browse a catalog** of vetted projects, or **search by category** (AI, Web
+  apps, Data & tools, Media…).
+- Click a project, read what it does, and press **Install** — DevReady clones
+  it, sets everything up, and shows a **live progress log** right in the page.
+- When it's ready, click **Open app** to launch it (e.g. `http://localhost:8501`).
+- Find everything you've installed under **My Apps**, and reopen it any time.
+
+### Adding the free AI key (optional, in the browser)
+
+In the app, open **Settings**. There's a short built-in guide to get a **free**
+OpenRouter key (about a minute, no credit card), and a box to paste it into.
+Your key is stored **only on your computer** and is sent **only** to OpenRouter —
+DevReady has no server and never sees it. It's optional: DevReady works without
+it using an offline parser.
+
+> 🔒 **Is this safe?** Yes — see [Security & privacy](#security--privacy). In
+> short: the app runs only on your machine, vetted catalog apps are the default,
+> and your API key never leaves your computer.
 
 ## Enabling the free AI parser (optional, recommended)
 
@@ -172,6 +244,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 |---------|-------------|
 | `devready start [path] [--yes]` | Run the full detect → set up → launch pipeline. **Use this the first time** (and after `git pull`). Add `--yes`/`-y` for an unattended run that accepts every prompt. |
 | `devready run [path]` | **Relaunch a set-up project — fast.** Skips all setup and relaunches every saved component. Use this every day after the first `start`. |
+| `devready ui [--no-browser]` | **Launch the browser GUI** — the easy, click-to-install app. Starts a local server (127.0.0.1 only) and opens it in your browser. Requires the `ui` extra (`pip install ".[ui]"`). |
 | `devready list` | List every project DevReady has set up, with its run status and URLs. |
 | `devready status [path]` | Show run state and URL(s) for each component. |
 | `devready stop [path]` | Stop the launched server and any started services. |
@@ -201,6 +274,35 @@ between them with a plain `cd` and `devready run`.
 > "command not found", the Python *Scripts* directory isn't on your `PATH`; add
 > it (e.g. `C:\Users\<you>\AppData\Roaming\Python\Python3xx\Scripts` on Windows),
 > open a new terminal, or just keep using `python -m devready` — it's identical.
+
+## Security & privacy
+
+DevReady installs and runs real projects on your machine, and can hold an API
+key, so it's built to be safe by default:
+
+- **No cloud. Nothing phones home.** DevReady runs entirely on your computer.
+  The browser GUI is served by a **local** server — there is no DevReady server
+  anywhere, so there's no central place your data or keys could be collected.
+- **Your API key stays on your machine.** It's stored in `~/.devready/config.json`
+  with owner-only permissions (`0600`) and is sent **only** to OpenRouter, never
+  to us. In the GUI it's entered over `localhost`, masked, and never logged.
+- **The local web server is locked down.** It binds to **`127.0.0.1` only** (never
+  reachable from your network), every action requires a **random per-launch
+  token** embedded in the URL, and requests are checked for a loopback `Host`
+  and same-origin `Origin`. Together these stop other programs or web pages on
+  your machine from driving DevReady behind your back (CSRF / DNS-rebinding).
+- **Vetted apps are the default.** In the easy app, non-technical users install
+  from a **curated catalog** of reviewed projects — not the open internet.
+  Installing an arbitrary GitHub URL is a separate, clearly-warned "advanced"
+  action, because it runs that project's own setup on your computer.
+- **Nothing changes your system silently.** System-level installs ask first
+  (unless you pass `--yes`), each project is isolated in its own environment,
+  and before any install the app shows you exactly what it will do.
+
+> ⚠️ **Honest note:** running any project's setup means running *its* code. The
+> curated catalog exists precisely so non-technical users don't have to judge
+> that risk themselves. Only use the "install from URL" option for repos you
+> trust.
 
 ## How configuration is stored
 
@@ -291,8 +393,16 @@ devready/
 │   ├── system_deps.py     #   Install OS packages (brew/apt/choco) with consent.
 │   ├── version_manager.py #   Resolve per-project Python version (reuse or uv), create venvs, run installs.
 │   └── env_vars.py        #   Generate a .env with safe dev defaults.
-└── ai/
-    └── readme_parser.py   # LLM (OpenRouter) + offline regex fallback. Same output shape.
+├── ai/
+│   └── readme_parser.py   # LLM (OpenRouter) + offline regex fallback. Same output shape.
+└── web/                   # The optional browser GUI ("devready ui").
+    ├── server.py          #   FastAPI app + security middleware (token/host/origin).
+    ├── security.py        #   Token generation + loopback/origin checks.
+    ├── catalog.py         #   Load/search the curated catalog (the safe surface).
+    ├── catalog.json       #   The vetted project list shown in the GUI.
+    ├── jobs.py            #   Clone + run setup in the background, stream the log.
+    └── static/index.html  #   The single-page app (browse, install, library, settings).
+scripts/                   # install.sh / install.bat — the one-time easy-app installer.
 tests/                     # pytest suite (no network needed).
 ```
 
@@ -323,6 +433,9 @@ offline.
 
 ## Roadmap
 
+- **Easy app, next steps:** signed installers (so non-technical users don't see
+  "unknown publisher" warnings), in-GUI GitHub search ("advanced" mode), and an
+  optional sandbox for installing untrusted repos.
 - Per-project version auto-install for more runtimes (Go, Ruby, Java) the way
   uv handles Python.
 - Richer migration detection (Prisma, TypeORM, Flyway, EF Core).
