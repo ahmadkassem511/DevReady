@@ -143,6 +143,7 @@ class Engine:
 
         self._step_detect()
         self._step_analyze_readme()
+        self._print_plan()  # complete plan (toolchains + packages + env) before any install
         self._step_system_deps()
         self._step_environment()
         self._step_env_vars()
@@ -234,12 +235,6 @@ class Engine:
                 ", ".join(det.package_files),
             )
         console.print(table)
-
-        # Smart preflight: work out what this project needs vs. what's installed,
-        # and show the plan *before* we start installing anything.
-        report = self.requirements_report()
-        if report:
-            self._print_requirements(report)
 
     # -- Step 2: README analysis ---------------------------------------------
     def _step_analyze_readme(self) -> None:
@@ -1078,7 +1073,36 @@ class Engine:
         except Exception:
             pass  # strategy detection is best-effort; never block the report
 
+        # System packages the README mentions (ffmpeg, postgres…). Cleaned and
+        # de-duplicated; language runtimes are dropped (handled above).
+        if self.insights and self.insights.system_packages:
+            to_install, _ = system_deps.normalize_packages(self.insights.system_packages)
+            for pkg in to_install:
+                have = system_deps.is_installed(pkg)
+                items.append(self._req(
+                    pkg, "system package", "yes" if have else "no",
+                    have, f"install {pkg} (via your package manager)"))
+
+        # Environment file: if the README declares env vars or the repo ships an
+        # example, DevReady will generate a .env with safe local defaults.
+        env_count = len(self.insights.env_vars) if self.insights else 0
+        has_example = any(
+            (self.project_dir / name).exists() for name in (".env.example", ".env.sample", ".env.template")
+        )
+        env_exists = (self.project_dir / ".env").exists()
+        if env_count or has_example:
+            needs = f"{env_count} variable(s)" if env_count else "from example"
+            items.append(self._req(
+                ".env file", needs, "present" if env_exists else "—",
+                env_exists, "generate .env with safe dev defaults"))
+
         return items
+
+    def _print_plan(self) -> None:
+        """Print the complete preflight plan (called after README analysis)."""
+        report = self.requirements_report()
+        if report:
+            self._print_requirements(report)
 
     def _print_requirements(self, items: List[dict]) -> None:
         """Render the preflight plan: what's ready, and what DevReady will set up."""
@@ -1132,6 +1156,15 @@ class Engine:
 
         # If we're inside a recognised project, show its requirement plan too —
         # what it needs vs. what's installed, before you run `devready start`.
+        # Use the fast offline README parser here so doctor stays quick/offline.
+        readme = self._find_readme()
+        if readme is not None and self.insights.is_empty:
+            from .ai.readme_parser import _parse_with_regex
+
+            try:
+                self.insights = _parse_with_regex(readme.read_text(encoding="utf-8"))
+            except OSError:
+                pass
         report = self.requirements_report()
         if report:
             console.print(f"\n[muted]Project at {self.project_dir}:[/muted]")

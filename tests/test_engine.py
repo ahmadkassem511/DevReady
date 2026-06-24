@@ -31,6 +31,19 @@ def test_requirements_report_node_flags_version(tmp_path, monkeypatch):
     assert "fnm" in node["action"]
 
 
+def test_requirements_report_includes_system_packages_and_env(tmp_path):
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / ".env.example").write_text("API_KEY=\n")
+    from devready.ai import ReadmeInsights
+
+    eng = Engine(project_dir=tmp_path)
+    eng.insights = ReadmeInsights(system_packages=["ffmpeg"], env_vars={"API_KEY": "key"})
+    report = eng.requirements_report()
+    names = [r["name"] for r in report]
+    assert "ffmpeg" in names          # README system package surfaced
+    assert ".env file" in names        # env file row surfaced
+
+
 def test_requirements_report_empty_for_unknown(tmp_path):
     # A directory with no recognised stack yields no requirement rows.
     assert Engine(project_dir=tmp_path).requirements_report() == []
