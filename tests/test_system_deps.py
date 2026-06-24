@@ -86,6 +86,18 @@ def test_node_has_tool_mappings():
     assert TOOL_PACKAGES["node"]["brew"] == "node"
 
 
+def test_all_language_toolchains_are_installable():
+    # Every language DevReady supports must have an auto-install mapping so a
+    # missing toolchain never dead-ends the setup.
+    from devready.environment.system_deps import TOOL_PACKAGES
+
+    for runner in ("cargo", "go", "ruby", "composer", "dotnet", "mvn", "gradle"):
+        assert runner in TOOL_PACKAGES, f"{runner} has no auto-install mapping"
+        # Each must at least cover brew (mac) and apt (linux).
+        assert "brew" in TOOL_PACKAGES[runner]
+        assert "apt" in TOOL_PACKAGES[runner]
+
+
 def test_ensure_node_short_circuits_when_npm_present(monkeypatch):
     # When npm is already on PATH, ensure_node returns True without installing.
     import devready.environment.system_deps as sd

@@ -28,6 +28,34 @@ def test_node_package_manager_detection(tmp_path):
     assert _node_package_manager(tmp_path) == "pnpm"
 
 
+def test_toolchain_auto_installs_missing_runner(tmp_path, monkeypatch):
+    # When a language toolchain (e.g. cargo) is missing, setup should install it
+    # and continue — not warn and stop.
+    import devready.environment.system_deps as sd
+    import devready.environment.version_manager as vm
+
+    monkeypatch.setattr(vm, "command_exists", lambda n: False)  # cargo missing
+    installed = []
+    monkeypatch.setattr(sd, "install_tool", lambda name: installed.append(name) or True)
+    ran = []
+    monkeypatch.setattr(vm, "run_command", lambda *a, **k: ran.append(a) or vm.CommandResult(command="x", returncode=0))
+
+    out = vm.setup_rust(tmp_path, None)
+    assert installed == ["cargo"]   # tried to install the missing toolchain
+    assert ran                      # then proceeded to build
+    assert out and out[0].ok
+
+
+def test_toolchain_gives_up_gracefully_when_install_fails(tmp_path, monkeypatch):
+    import devready.environment.system_deps as sd
+    import devready.environment.version_manager as vm
+
+    monkeypatch.setattr(vm, "command_exists", lambda n: False)
+    monkeypatch.setattr(sd, "install_tool", lambda name: False)  # couldn't install
+    out = vm.setup_go(tmp_path, None)
+    assert out == []  # no build attempted, but no crash
+
+
 def test_parse_version_major_minor():
     assert _parse_version("3.11") == (3, 11)
 

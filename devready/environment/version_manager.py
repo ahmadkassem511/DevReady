@@ -432,15 +432,20 @@ def _toolchain_setup(
 
     Used by the Rust/Go/Ruby/PHP setups, which (unlike Python) don't need a
     virtualenv — their package managers install into a project-local location
-    on their own. If the tool isn't installed we warn with how to get it rather
-    than failing cryptically.
+    on their own. If the required tool isn't installed, DevReady installs it
+    (via the system package manager) and continues — the same philosophy as uv
+    for Python and corepack for Node — rather than dead-ending on a missing tool.
     """
     if not command_exists(runner):
-        console.print(
-            f"  [warning]{language} project detected, but '{runner}' isn't installed.\n"
-            f"  Install it ({install_hint}) and re-run, so DevReady can set up dependencies.[/warning]"
-        )
-        return []
+        from . import system_deps
+
+        console.print(f"  {language} needs '{runner}', which isn't installed — installing it…")
+        if not system_deps.install_tool(runner):
+            console.print(
+                f"  [warning]Couldn't install '{runner}' automatically. "
+                f"Install it ({install_hint}) and re-run.[/warning]"
+            )
+            return []
     console.print(f"  Installing {language} dependencies ({' '.join(install_cmd)})…")
     return [run_command(install_cmd, cwd=str(project_dir), capture=False)]
 
@@ -474,15 +479,19 @@ def setup_ruby(project_dir: Path, result: DetectionResult) -> List[CommandResult
     """
     outcomes: List[CommandResult] = []
     if not command_exists("bundle"):
-        if command_exists("gem"):
-            console.print("  Bundler not found — installing it (gem install bundler)…")
-            outcomes.append(run_command(["gem", "install", "bundler"], cwd=str(project_dir), capture=False))
-        else:
-            console.print(
-                "  [warning]Ruby project detected, but neither 'bundle' nor 'gem' is installed.\n"
-                "  Install Ruby (https://www.ruby-lang.org) and re-run.[/warning]"
-            )
-            return outcomes
+        if not command_exists("gem"):
+            # No Ruby at all — install it (it ships gem), then continue.
+            from . import system_deps
+
+            console.print("  Ruby isn't installed — installing it…")
+            if not system_deps.install_tool("ruby") or not command_exists("gem"):
+                console.print(
+                    "  [warning]Couldn't install Ruby automatically. "
+                    "Install it (https://www.ruby-lang.org) and re-run.[/warning]"
+                )
+                return outcomes
+        console.print("  Bundler not found — installing it (gem install bundler)…")
+        outcomes.append(run_command(["gem", "install", "bundler"], cwd=str(project_dir), capture=False))
     console.print("  Installing Ruby dependencies (bundle install)…")
     outcomes.append(run_command(["bundle", "install"], cwd=str(project_dir), capture=False))
     return outcomes
@@ -523,25 +532,33 @@ def _runner_available(executable: str) -> bool:
 
 def setup_java(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
     """Build a Java project's dependencies with Maven or Gradle (wrapper-aware)."""
+    from . import system_deps
+
     if (project_dir / "pom.xml").exists():
         exe = maven_executable(project_dir)
         if not _runner_available(exe):
-            console.print(
-                "  [warning]Java/Maven project detected, but Maven isn't installed.\n"
-                "  Install it (https://maven.apache.org) and re-run.[/warning]"
-            )
-            return []
+            console.print("  Java/Maven project, but Maven isn't installed — installing it…")
+            if not system_deps.install_tool("mvn"):
+                console.print(
+                    "  [warning]Couldn't install Maven automatically. "
+                    "Install it (https://maven.apache.org) and re-run.[/warning]"
+                )
+                return []
+            exe = maven_executable(project_dir)
         console.print("  Building with Maven (install -DskipTests)…")
         return [run_command([exe, "install", "-DskipTests"], cwd=str(project_dir), capture=False)]
 
     # Otherwise it's a Gradle project.
     exe = gradle_executable(project_dir)
     if not _runner_available(exe):
-        console.print(
-            "  [warning]Java/Gradle project detected, but Gradle isn't installed.\n"
-            "  Install it (https://gradle.org) and re-run.[/warning]"
-        )
-        return []
+        console.print("  Java/Gradle project, but Gradle isn't installed — installing it…")
+        if not system_deps.install_tool("gradle"):
+            console.print(
+                "  [warning]Couldn't install Gradle automatically. "
+                "Install it (https://gradle.org) and re-run.[/warning]"
+            )
+            return []
+        exe = gradle_executable(project_dir)
     console.print("  Building with Gradle (build -x test)…")
     return [run_command([exe, "build", "-x", "test"], cwd=str(project_dir), capture=False)]
 

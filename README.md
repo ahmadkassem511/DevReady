@@ -53,7 +53,7 @@ eight steps:
 | 1. **Detect** | Scans for `package.json`, `requirements.txt`, `pyproject.toml`, etc. to identify languages, frameworks, and required versions. |
 | 2. **Read the README** | Uses a **free** LLM (via OpenRouter) — or an offline parser — to extract install commands, system packages, env vars, and DB steps. If the chosen free model is rate-limited or retired, DevReady automatically tries others and even queries OpenRouter's live model list to find a working free one. |
 | 3. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`choco`, with your permission. Cleans up README-style names (`Node.js 18+` → `nodejs`) and skips language runtimes — those are handled per-project in step 4. |
-| 4. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. If the tool that runs it (e.g. `make`) isn't installed, DevReady offers to **install that tool for you** and then continues. Otherwise it does language-native setup: Python (correct version via [uv](https://github.com/astral-sh/uv) + isolated `.venv` + pip), Node (fnm/nvm + npm), Rust (`cargo build`), Go (`go mod download`), Ruby (`bundle install`), PHP (`composer install`), Java (Maven/Gradle), .NET (`dotnet restore`). **Monorepos** are handled too — sub-projects in subdirectories (e.g. a `frontend/` Node app) are detected and set up as well. |
+| 4. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. **If a required tool or toolchain isn't installed, DevReady installs it for you and continues** — the runner (`make`/`just`/`task`), Node (via the package manager; `yarn`/`pnpm` provisioned through corepack), or a missing language toolchain (Rust, Go, Ruby, PHP, Java/Maven/Gradle, .NET) via `brew`/`apt`/`choco`/etc. Otherwise it does language-native setup: Python (correct version via [uv](https://github.com/astral-sh/uv) + isolated `.venv` + pip), Node (picks `npm`/`yarn`/`pnpm` from the lockfile), Rust (`cargo build`), Go (`go mod download`), Ruby (`bundle install`), PHP (`composer install`), Java (Maven/Gradle), .NET (`dotnet restore`). **Monorepos** are handled too — sub-projects in subdirectories (e.g. a `frontend/` Node app) are detected and set up as well. |
 | 5. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
 | 6. **Services** | If a `docker-compose.yml` exists (and Docker is running), offers to start the services. |
 | 7. **Migrations** | Detects and runs migrations (Django, Alembic, Knex…). |
@@ -438,10 +438,10 @@ offline.
 - **Easy app, next steps:** signed installers (so non-technical users don't see
   "unknown publisher" warnings), in-GUI GitHub search ("advanced" mode), and an
   optional sandbox for installing untrusted repos.
-- Per-project version auto-install for more runtimes (Go, Ruby, Java) the way
-  uv handles Python.
+- Per-project *version* pinning for more runtimes (Go, Ruby, Java) the way uv
+  handles Python and corepack handles Node — DevReady already auto-installs the
+  toolchains themselves; this is about honouring an exact required version.
 - Richer migration detection (Prisma, TypeORM, Flyway, EF Core).
-- Auto-install full language SDKs (cargo/go/ruby/php/dotnet) on demand.
 
 ## License
 

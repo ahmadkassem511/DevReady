@@ -140,6 +140,45 @@ TOOL_PACKAGES = {
         "brew": "node", "apt": "nodejs", "apt-get": "nodejs", "dnf": "nodejs",
         "yum": "nodejs", "pacman": "nodejs",
     },
+    # Language toolchains — auto-installed when a project needs one but it isn't
+    # present, so DevReady can set up Rust/Go/Ruby/PHP/Java/.NET projects without
+    # the user pre-installing the toolchain. Package names are best-effort per
+    # manager; where a mapping is missing, install_tool falls back to the name.
+    "cargo": {  # Rust (rustup provides cargo)
+        "choco": "rust", "scoop": "rust", "winget": "Rustlang.Rustup",
+        "brew": "rust", "apt": "cargo", "apt-get": "cargo", "dnf": "cargo",
+        "yum": "cargo", "pacman": "rust",
+    },
+    "go": {
+        "choco": "golang", "scoop": "go", "winget": "GoLang.Go",
+        "brew": "go", "apt": "golang-go", "apt-get": "golang-go", "dnf": "golang",
+        "yum": "golang", "pacman": "go",
+    },
+    "ruby": {
+        "choco": "ruby", "scoop": "ruby", "winget": "RubyInstallerTeam.Ruby.3.3",
+        "brew": "ruby", "apt": "ruby-full", "apt-get": "ruby-full", "dnf": "ruby",
+        "yum": "ruby", "pacman": "ruby",
+    },
+    "composer": {  # PHP dependency manager (also pulls php where packaged together)
+        "choco": "composer", "scoop": "composer", "winget": "PHP.Composer",
+        "brew": "composer", "apt": "composer", "apt-get": "composer",
+        "dnf": "composer", "yum": "composer", "pacman": "composer",
+    },
+    "dotnet": {
+        "choco": "dotnet-sdk", "scoop": "dotnet-sdk", "winget": "Microsoft.DotNet.SDK.8",
+        "brew": "dotnet", "apt": "dotnet-sdk-8.0", "apt-get": "dotnet-sdk-8.0",
+        "dnf": "dotnet-sdk-8.0", "yum": "dotnet-sdk-8.0", "pacman": "dotnet-sdk",
+    },
+    "mvn": {  # Java / Maven
+        "choco": "maven", "scoop": "maven", "winget": "Apache.Maven",
+        "brew": "maven", "apt": "maven", "apt-get": "maven", "dnf": "maven",
+        "yum": "maven", "pacman": "maven",
+    },
+    "gradle": {  # Java / Gradle
+        "choco": "gradle", "scoop": "gradle", "winget": "Gradle.Gradle",
+        "brew": "gradle", "apt": "gradle", "apt-get": "gradle", "dnf": "gradle",
+        "yum": "gradle", "pacman": "gradle",
+    },
 }
 
 # Where each package manager drops executables, so we can make a freshly
