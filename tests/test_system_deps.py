@@ -98,6 +98,16 @@ def test_all_language_toolchains_are_installable():
         assert "apt" in TOOL_PACKAGES[runner]
 
 
+def test_fnm_is_installable_on_windows_and_mac():
+    # fnm powers per-project Node versions; it must be auto-installable where
+    # it's packaged (Windows managers + brew).
+    from devready.environment.system_deps import TOOL_PACKAGES
+
+    assert TOOL_PACKAGES["fnm"]["winget"] == "Schniz.fnm"
+    assert TOOL_PACKAGES["fnm"]["choco"] == "fnm"
+    assert TOOL_PACKAGES["fnm"]["brew"] == "fnm"
+
+
 def test_ensure_node_short_circuits_when_npm_present(monkeypatch):
     # When npm is already on PATH, ensure_node returns True without installing.
     import devready.environment.system_deps as sd

@@ -28,6 +28,17 @@ def test_node_package_manager_detection(tmp_path):
     assert _node_package_manager(tmp_path) == "pnpm"
 
 
+def test_node_satisfies(monkeypatch):
+    import devready.environment.version_manager as vm
+
+    monkeypatch.setattr(vm, "_node_version", lambda: "22.21.1")
+    assert vm._node_satisfies("22.22") is False   # 22.21 does not meet >=22.22
+    assert vm._node_satisfies("22") is True        # any 22.x meets a major-only pin
+    assert vm._node_satisfies("18") is True        # 22 is newer than 18
+    monkeypatch.setattr(vm, "_node_version", lambda: None)
+    assert vm._node_satisfies("18") is False       # no Node installed
+
+
 def test_toolchain_auto_installs_missing_runner(tmp_path, monkeypatch):
     # When a language toolchain (e.g. cargo) is missing, setup should install it
     # and continue — not warn and stop.

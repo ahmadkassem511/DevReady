@@ -140,6 +140,13 @@ TOOL_PACKAGES = {
         "brew": "node", "apt": "nodejs", "apt-get": "nodejs", "dnf": "nodejs",
         "yum": "nodejs", "pacman": "nodejs",
     },
+    # fnm — fast Node version manager, auto-installed when a project pins a Node
+    # version the current one doesn't meet, so DevReady can use the right Node
+    # per project. (apt/dnf don't package it; there it falls back gracefully.)
+    "fnm": {
+        "choco": "fnm", "scoop": "fnm", "winget": "Schniz.fnm",
+        "brew": "fnm", "pacman": "fnm",
+    },
     # Language toolchains — auto-installed when a project needs one but it isn't
     # present, so DevReady can set up Rust/Go/Ruby/PHP/Java/.NET projects without
     # the user pre-installing the toolchain. Package names are best-effort per

@@ -442,8 +442,9 @@ offline.
   "unknown publisher" warnings), in-GUI GitHub search ("advanced" mode), and an
   optional sandbox for installing untrusted repos.
 - Per-project *version* pinning for more runtimes (Go, Ruby, Java) the way uv
-  handles Python and corepack handles Node — DevReady already auto-installs the
-  toolchains themselves; this is about honouring an exact required version.
+  handles Python and fnm/corepack now handle Node — DevReady already
+  auto-installs the toolchains themselves and honours pinned Node + pnpm/yarn
+  versions; this extends exact-version pinning to the remaining languages.
 - Richer migration detection (Prisma, TypeORM, Flyway, EF Core).
 
 ## License

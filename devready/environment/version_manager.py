@@ -322,25 +322,39 @@ def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult
         if not system_deps.ensure_node():
             return outcomes
 
-    # The command prefix used to run npm. When fnm is available and a specific
-    # version is required, we route npm through `fnm exec` so the right Node is
-    # used for THIS project only — the user's default Node is untouched.
+    # The command prefix used to run the package manager. When the project pins a
+    # Node version the current one doesn't meet, we route through `fnm exec` so
+    # the right Node is used for THIS project only — the user's default Node is
+    # untouched. fnm itself is auto-installed if needed.
     npm_prefix: List[str] = []
 
-    if result.version:
+    if result.version and not _node_satisfies(result.version):
+        if not command_exists("fnm") and not command_exists("nvm"):
+            from . import system_deps
+
+            console.print(
+                f"  This project needs Node {result.version} (you have {_node_version() or 'none'}); "
+                f"installing fnm to manage Node versions…"
+            )
+            system_deps.install_tool("fnm")
         if command_exists("fnm"):
             console.print(f"  Ensuring Node {result.version} via fnm (isolated to this project)…")
-            outcomes.append(run_command(["fnm", "install", result.version], capture=False))
-            npm_prefix = ["fnm", "exec", "--using", result.version, "--"]
+            inst = run_command(["fnm", "install", result.version], capture=False)
+            outcomes.append(inst)
+            if inst.ok:
+                npm_prefix = ["fnm", "exec", "--using", result.version, "--"]
+            else:
+                console.print(
+                    f"  [warning]Couldn't install Node {result.version} via fnm — "
+                    f"proceeding with the current Node.[/warning]"
+                )
         elif command_exists("nvm"):
             console.print(f"  Ensuring Node {result.version} via nvm…")
-            # nvm is a shell function, so it must run through the shell.
             outcomes.append(run_command(f"nvm install {result.version}", shell=True, capture=False))
-        elif _node_version() and not _node_matches(result.version):
+        else:
             console.print(
                 f"  [warning]This project targets Node {result.version} but the installed Node is "
-                f"{_node_version()}. Install fnm (https://github.com/Schniz/fnm) so DevReady can "
-                f"manage Node versions automatically; proceeding with the current Node for now.[/warning]"
+                f"{_node_version()}; proceeding with the current Node.[/warning]"
             )
 
     # 2. Install dependencies using the package manager the project actually
@@ -348,17 +362,18 @@ def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult
     #    npm often breaks, so honour yarn.lock / pnpm-lock.yaml.
     pm = _node_package_manager(project_dir)
 
-    # If the project's package manager isn't installed, run it *through* corepack
-    # (bundled with Node 16.10+). `corepack yarn …` provisions the right version
-    # on demand without writing global shims or needing admin rights. We disable
-    # corepack's interactive download prompt so an unattended run never hangs.
+    # Run yarn/pnpm THROUGH corepack (bundled with Node 16.10+) whenever it's
+    # available. Corepack reads the project's pinned version (package.json
+    # "packageManager", or engines) and provisions exactly that — so a project
+    # needing pnpm 10 isn't run with a stale global pnpm 9. It also needs no
+    # global shims or admin rights. We disable the interactive download prompt
+    # so an unattended run never hangs.
     pm_runner: List[str] = [pm]
-    if pm != "npm" and not command_exists(pm):
+    if pm != "npm":
         if command_exists("corepack"):
-            console.print(f"  Provisioning {pm} via corepack…")
             os.environ.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
             pm_runner = ["corepack", pm]
-        else:
+        elif not command_exists(pm):
             console.print(f"  [warning]{pm} isn't available — using npm instead.[/warning]")
             pm = "npm"
 
@@ -415,6 +430,30 @@ def _node_matches(required: str) -> bool:
     req_major = re.match(r"(\d+)", required.strip())
     inst_major = re.match(r"(\d+)", installed)
     return bool(req_major and inst_major and req_major.group(1) == inst_major.group(1))
+
+
+def _version_tuple(v: str) -> Optional[Tuple[int, int]]:
+    """Parse 'major' or 'major.minor' (ignoring any suffix) into a (major, minor) tuple."""
+    m = re.match(r"(\d+)(?:\.(\d+))?", (v or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2) or 0)
+
+
+def _node_satisfies(required: str) -> bool:
+    """True if the installed Node meets the required (major, minor) or newer.
+
+    Used to decide whether to manage a per-project Node version: a project that
+    pins ``>=22.22`` isn't satisfied by 22.21, so DevReady provisions the right
+    version via fnm. A pin of just ``18`` is met by any 18.x or newer.
+    """
+    installed = _node_version()
+    if not installed:
+        return False
+    req, inst = _version_tuple(required), _version_tuple(installed)
+    if not req or not inst:
+        return False
+    return inst >= req
 
 
 # -----------------------------------------------------------------------------
