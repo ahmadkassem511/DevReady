@@ -17,6 +17,7 @@ import re
 import signal
 import subprocess
 import socket
+import sys
 import time
 import webbrowser
 from pathlib import Path
@@ -233,6 +234,12 @@ class Engine:
                 ", ".join(det.package_files),
             )
         console.print(table)
+
+        # Smart preflight: work out what this project needs vs. what's installed,
+        # and show the plan *before* we start installing anything.
+        report = self.requirements_report()
+        if report:
+            self._print_requirements(report)
 
     # -- Step 2: README analysis ---------------------------------------------
     def _step_analyze_readme(self) -> None:
@@ -994,13 +1001,109 @@ class Engine:
         console.print("  [success]Clean complete.[/success]")
 
     # =========================================================================
+    # Smart preflight: what does this project need vs. what's installed?
+    # =========================================================================
+    @staticmethod
+    def _req(name: str, needs: str, have: str, ready: bool, action: str) -> dict:
+        """Build one requirement row for the preflight report."""
+        return {"name": name, "needs": needs, "have": have, "ready": ready, "action": action}
+
+    def requirements_report(self) -> List[dict]:
+        """Analyse what this project needs vs. what's installed, before installing.
+
+        Returns a list of requirement rows ({name, needs, have, ready, action}).
+        ``ready`` means it's already satisfied; otherwise ``action`` describes
+        what DevReady will do (install/provision it). This powers the "plan"
+        shown during ``start`` and ``devready doctor <path>``.
+        """
+        from .environment import version_manager as vm
+
+        detections = self.detections or detect_stack(self.project_dir)
+        items: List[dict] = []
+
+        for det in detections:
+            lang = det.language
+            if lang == "Node.js":
+                have = vm._node_version()
+                if det.version:
+                    ok = vm._node_satisfies(det.version)
+                    items.append(self._req(
+                        "Node.js", f">= {det.version}", have or "not installed",
+                        ok, f"install Node {det.version} (via fnm)"))
+                else:
+                    items.append(self._req(
+                        "Node.js", "any recent", have or "not installed",
+                        bool(have), "install Node (via your package manager)"))
+                pm = vm._node_package_manager(self.project_dir)
+                if pm == "npm":
+                    items.append(self._req("npm", "package manager",
+                        "yes" if command_exists("npm") else "no",
+                        command_exists("npm"), "comes with Node"))
+                else:
+                    ok_pm = command_exists(pm) or command_exists("corepack")
+                    items.append(self._req(pm, "package manager",
+                        "yes" if command_exists(pm) else ("via corepack" if command_exists("corepack") else "no"),
+                        ok_pm, f"provision {pm} (via corepack)"))
+
+            elif lang == "Python":
+                cur = vm._interpreter_version(sys.executable)
+                have = f"{cur[0]}.{cur[1]}" if cur else "not found"
+                if det.version:
+                    found = vm.find_installed_python(det.version) is not None
+                    items.append(self._req(
+                        "Python", det.version, have if found else f"{have} (mismatch)",
+                        found, f"download Python {det.version} (via uv)"))
+                else:
+                    items.append(self._req("Python", "any 3.x", have, bool(cur), "use current Python"))
+                items.append(self._req(
+                    "Isolated env (.venv)", "per-project", "—", False, "create .venv + install deps"))
+
+            else:
+                runner = {
+                    "Rust": "cargo", "Go": "go", "Ruby": "bundle", "PHP": "composer",
+                    ".NET": "dotnet", "Java": "mvn",
+                }.get(lang, lang.lower())
+                have = command_exists(runner)
+                items.append(self._req(
+                    lang, runner, "yes" if have else "no", have, f"install {runner}"))
+
+        # The project's own setup runner (make/just/task), if it ships one.
+        try:
+            strat = strategies.detect_setup_strategies(self.project_dir)
+            for s in strat[:1]:  # the one DevReady would use
+                have = command_exists(s.runner)
+                items.append(self._req(
+                    f"{s.runner} (project setup)", s.display, "yes" if have else "no",
+                    have, f"install {s.runner}"))
+        except Exception:
+            pass  # strategy detection is best-effort; never block the report
+
+        return items
+
+    def _print_requirements(self, items: List[dict]) -> None:
+        """Render the preflight plan: what's ready, and what DevReady will set up."""
+        table = Table(title="Plan — what this project needs", show_header=True, header_style="bold")
+        table.add_column("Component")
+        table.add_column("Needs")
+        table.add_column("You have")
+        table.add_column("Plan")
+        for it in items:
+            plan = "[success]✓ ready[/success]" if it["ready"] else f"[info]⬇ {it['action']}[/info]"
+            table.add_row(it["name"], it["needs"], it["have"], plan)
+        console.print(table)
+        pending = [it for it in items if not it["ready"]]
+        if pending:
+            console.print(f"  [muted]DevReady will set up {len(pending)} item(s) for you automatically.[/muted]")
+
+    # =========================================================================
     # Public command: doctor
     # =========================================================================
     def doctor(self) -> None:
         """Print a diagnostic report of the local toolchain and config.
 
         This is the first thing to run when something goes wrong: it shows which
-        tools DevReady can see and whether the LLM is configured.
+        tools DevReady can see and whether the LLM is configured. When run inside
+        a project, it also shows that project's requirement plan.
         """
         print_banner("DevReady doctor 🩺")
 
@@ -1026,6 +1129,18 @@ class Engine:
             table.add_row("LLM", "[warning]not configured — using regex fallback[/warning]")
 
         console.print(table)
+
+        # If we're inside a recognised project, show its requirement plan too —
+        # what it needs vs. what's installed, before you run `devready start`.
+        report = self.requirements_report()
+        if report:
+            console.print(f"\n[muted]Project at {self.project_dir}:[/muted]")
+            self._print_requirements(report)
+        else:
+            console.print(
+                "\n[muted]Run inside a project (or `devready doctor <path>`) to see its "
+                "requirement plan.[/muted]"
+            )
 
     # =========================================================================
     # Public command: list (all projects DevReady has set up)

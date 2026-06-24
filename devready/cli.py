@@ -135,9 +135,18 @@ def clean(
 
 
 @app.command()
-def doctor() -> None:
-    """Diagnose the local toolchain and DevReady configuration."""
-    Engine().doctor()
+def doctor(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Project to analyse (defaults to the current directory).",
+    ),
+) -> None:
+    """Diagnose the local toolchain, and show a project's requirement plan.
+
+    Run inside a project (or pass its PATH) to see what it needs vs. what's
+    installed — and what DevReady will set up — *before* running ``start``.
+    """
+    Engine(project_dir=path).doctor()
 
 
 @app.command("list")

@@ -50,7 +50,7 @@ eight steps:
 
 | Step | What happens |
 |------|--------------|
-| 1. **Detect** | Scans for `package.json`, `requirements.txt`, `pyproject.toml`, etc. to identify languages, frameworks, and required versions. |
+| 1. **Detect & plan** | Scans for `package.json`, `requirements.txt`, `pyproject.toml`, etc. to identify languages, frameworks, and required versions — then prints a **plan** showing what the project needs vs. what's installed, and what DevReady will set up, *before* it changes anything. (Run `devready doctor` any time to see this plan without starting.) |
 | 2. **Read the README** | Uses a **free** LLM (via OpenRouter) — or an offline parser — to extract install commands, system packages, env vars, and DB steps. If the chosen free model is rate-limited or retired, DevReady automatically tries others and even queries OpenRouter's live model list to find a working free one. |
 | 3. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`choco`, with your permission. Cleans up README-style names (`Node.js 18+` → `nodejs`) and skips language runtimes — those are handled per-project in step 4. |
 | 4. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. **If a required tool or toolchain isn't installed, DevReady installs it for you and continues** — the runner (`make`/`just`/`task`), Node (via the package manager; `yarn`/`pnpm` provisioned through corepack), or a missing language toolchain (Rust, Go, Ruby, PHP, Java/Maven/Gradle, .NET) via `brew`/`apt`/`choco`/etc. Otherwise it does language-native setup: Python (correct version via [uv](https://github.com/astral-sh/uv) + isolated `.venv` + pip), Node (picks `npm`/`yarn`/`pnpm` from the lockfile), Rust (`cargo build`), Go (`go mod download`), Ruby (`bundle install`), PHP (`composer install`), Java (Maven/Gradle), .NET (`dotnet restore`). **Monorepos** are handled too — sub-projects in subdirectories (e.g. a `frontend/` Node app) are detected and set up as well. |
@@ -254,7 +254,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 | `devready status [path]` | Show run state and URL(s) for each component. |
 | `devready stop [path]` | Stop the launched server and any started services. |
 | `devready clean [path]` | Remove DevReady-managed artifacts (`.venv`, state). |
-| `devready doctor` | Diagnose your toolchain and configuration. |
+| `devready doctor [path]` | Diagnose your toolchain and configuration — and, inside a project, show its **requirement plan**: what it needs vs. what's installed, and what DevReady will set up, *before* you run `start`. |
 | `devready config show` | Print the current configuration (key masked). |
 | `devready config set llm openrouter [--model M] [--api-key K]` | Configure the LLM. |
 | `devready --version` | Print the version. |
