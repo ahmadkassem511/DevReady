@@ -183,7 +183,9 @@ where you can:
 - Click a project, read what it does, and press **Install** — DevReady clones
   it, sets everything up, and shows a **live progress log** right in the page.
 - When it's ready, click **Open app** to launch it (e.g. `http://localhost:8501`).
-- Find everything you've installed under **My Apps**, and reopen it any time.
+- **My Projects** is your control panel for everything you've installed: **Run**
+  a project, **Open** it in the browser, **Stop** it, **Remove** it from the list,
+  or **Delete** its files — all without touching a terminal.
 
 ### Adding the free AI key (optional, in the browser)
 

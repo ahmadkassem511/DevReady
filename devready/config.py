@@ -112,6 +112,24 @@ def register_project(project_dir: Path) -> None:
     )
 
 
+def unregister_project(project_dir: Path) -> bool:
+    """Remove a project from the registry. Returns True if it was present.
+
+    Used by ``My Projects`` in the GUI to drop a project from the list (e.g. one
+    whose folder was deleted, or that the user no longer wants tracked).
+    """
+    resolved = str(Path(project_dir).resolve())
+    projects = _load_projects()
+    remaining = [p for p in projects if p.get("path") != resolved]
+    if len(remaining) == len(projects):
+        return False
+    config_dir().mkdir(parents=True, exist_ok=True)
+    projects_path().write_text(
+        json.dumps({"projects": remaining}, indent=2), encoding="utf-8"
+    )
+    return True
+
+
 def list_projects() -> List[Dict[str, str]]:
     """Return the registered projects (most recently set up first)."""
     return _load_projects()

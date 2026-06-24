@@ -99,6 +99,37 @@ class JobManager:
         threading.Thread(target=self._run, args=(job,), daemon=True).start()
         return job
 
+    def start_relaunch(self, project_dir: str) -> Job:
+        """Relaunch an already-set-up project (the GUI's 'Run' button).
+
+        Streams the same way as an install, but runs ``devready run`` (fast, no
+        setup) instead of ``devready start``.
+        """
+        path = Path(project_dir)
+        job = Job(id=uuid.uuid4().hex, repo_url="", name=path.name)
+        job.project_dir = str(path)
+        self._jobs[job.id] = job
+        threading.Thread(target=self._run_relaunch, args=(job,), daemon=True).start()
+        return job
+
+    def _run_relaunch(self, job: Job) -> None:
+        """Run ``devready run <dir>`` for an existing project, streaming output."""
+        try:
+            self._emit(job, f"→ Starting {job.name} …")
+            code = self._stream(
+                [sys.executable, "-m", "devready", "run", job.project_dir], job
+            )
+            if code == 0:
+                job.status = "success"
+                job.urls = self._read_urls(Path(job.project_dir))
+            else:
+                job.status = "error"
+        except Exception as exc:
+            job.status = "error"
+            self._emit(job, f"✗ Unexpected error: {exc}")
+        finally:
+            job.queue.put(_DONE)
+
     # -- internals -----------------------------------------------------------
     def _emit(self, job: Job, line: str) -> None:
         """Push one log line to the job's queue (drained by the SSE stream)."""

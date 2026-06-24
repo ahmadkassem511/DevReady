@@ -110,7 +110,7 @@
     <div class="brand"><span class="logo"></span> DevReady</div>
     <nav>
       <button data-view="discover" class="active">Discover</button>
-      <button data-view="library">My Apps</button>
+      <button data-view="library">My Projects</button>
       <button data-view="settings">Settings</button>
     </nav>
   </header>
@@ -135,8 +135,8 @@
 
     <!-- LIBRARY -->
     <section id="view-library" class="hidden">
-      <h1>My Apps</h1>
-      <p class="sub">Everything you've installed. Open a running app, or start one back up.</p>
+      <h1>My Projects</h1>
+      <p class="sub">Every project you've installed. Run it, open it, stop it, or remove it — all from here.</p>
       <div id="library" class="grid"></div>
     </section>
 
@@ -272,53 +272,48 @@
     }
     function closeOverlay() { document.getElementById("overlay").classList.remove("open"); }
 
-    // --- install + live log via SSE ---
-    async function startInstall(repoUrl) {
-      document.getElementById("detail-pane").classList.add("hidden");
+    // --- shared live-log streamer (used by install AND relaunch) ---
+    function streamJob(jobId, title, workingText, successText) {
       const pane = document.getElementById("install-pane");
+      document.getElementById("detail-pane").classList.add("hidden");
       pane.classList.remove("hidden");
       document.getElementById("overlay").classList.add("open");
       const logEl = document.getElementById("log");
       const statusEl = document.getElementById("i-status");
       const actions = document.getElementById("i-actions");
-      logEl.textContent = ""; statusEl.textContent = "Starting…";
-      actions.querySelectorAll(".btn").forEach(b => b.remove());
-
-      let resp;
-      try { resp = await api("/api/install", { method: "POST", body: JSON.stringify({ repo_url: repoUrl }) }); }
-      catch (e) { statusEl.textContent = "✗ " + e; return; }
-
-      document.getElementById("i-title").textContent = "Installing " + resp.name;
-      statusEl.textContent = "Working… this can take a few minutes.";
+      logEl.textContent = "";
+      actions.querySelectorAll(".btn, .note").forEach(b => b.remove());
+      document.getElementById("i-title").textContent = title;
+      statusEl.textContent = workingText;
 
       let finished = false;
-      const es = new EventSource(`/api/install/${resp.job_id}/stream?token=${encodeURIComponent(TOKEN)}`);
+      const es = new EventSource(`/api/jobs/${jobId}/stream?token=${encodeURIComponent(TOKEN)}`);
       es.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.type === "log") {
           logEl.textContent += msg.line + "\n";
           logEl.scrollTop = logEl.scrollHeight;
         } else if (msg.type === "done") {
-          if (finished) return;   // ignore any duplicate done frame
+          if (finished) return;
           finished = true;
           es.close();
           if (msg.status === "success") {
-            statusEl.textContent = "✓ Done!";
+            statusEl.textContent = successText;
             if (msg.urls && msg.urls.length) {
               msg.urls.forEach(u => {
                 const a = document.createElement("button");
-                a.className = "btn"; a.textContent = "Open app → " + u;
+                a.className = "btn"; a.textContent = "Open → " + u;
                 a.onclick = () => window.open(u, "_blank");
                 actions.appendChild(a);
               });
             } else {
               const note = document.createElement("span");
-              note.className = "muted";
-              note.textContent = "Setup complete. This project has no web page to open.";
+              note.className = "muted note";
+              note.textContent = "This project has no web page to open.";
               actions.appendChild(note);
             }
           } else {
-            statusEl.textContent = "✗ Setup failed — see the log above.";
+            statusEl.textContent = "✗ Failed — see the log above.";
           }
           const close = document.createElement("button");
           close.className = "btn secondary"; close.textContent = "Close";
@@ -329,26 +324,73 @@
       es.onerror = () => { es.close(); statusEl.textContent = "Connection lost."; };
     }
 
+    // --- install ---
+    async function startInstall(repoUrl) {
+      let resp;
+      try { resp = await api("/api/install", { method: "POST", body: JSON.stringify({ repo_url: repoUrl }) }); }
+      catch (e) { alert("✗ " + e); return; }
+      streamJob(resp.job_id, "Installing " + resp.name, "Working… this can take a few minutes.", "✓ Installed!");
+    }
+
     function installCustom() {
       const url = document.getElementById("custom-url").value.trim();
       if (!url) return;
       startInstall(url);
     }
 
-    // --- library ---
+    // --- library / control panel ---
     async function loadLibrary() {
       const { projects } = await api("/api/projects");
       const el = document.getElementById("library");
-      if (!projects.length) { el.innerHTML = `<div class="empty">Nothing installed yet. Head to Discover to add your first app.</div>`; return; }
-      el.innerHTML = projects.map(p => `
+      if (!projects.length) { el.innerHTML = `<div class="empty">Nothing installed yet. Head to Discover to add your first project.</div>`; return; }
+      el.innerHTML = projects.map(p => {
+        const enc = encodeURIComponent(p.path);
+        let buttons = "";
+        if (p.status === "running") {
+          buttons += p.urls.map(u => `<button class="btn" onclick="window.open('${u}','_blank')">Open</button>`).join("");
+          buttons += `<button class="btn secondary" onclick="stopProject('${enc}')">Stop</button>`;
+        } else if (p.status === "stopped") {
+          buttons += `<button class="btn" onclick="startProject('${enc}','${esc(p.name)}')">Run</button>`;
+          buttons += `<button class="btn secondary" onclick="removeProject('${enc}', false)">Remove</button>`;
+          buttons += `<button class="btn danger" onclick="removeProject('${enc}', true)">Delete files</button>`;
+        } else { // missing
+          buttons += `<button class="btn secondary" onclick="removeProject('${enc}', false)">Remove from list</button>`;
+        }
+        return `
         <div class="card">
           <h3>${esc(p.name)}</h3>
           <span class="lang"><span class="status-dot dot-${p.status}"></span> ${p.status}</span>
           <p class="muted">${esc(p.path)}</p>
-          <div class="actions">
-            ${p.urls.map(u => `<button class="btn" onclick="window.open('${u}','_blank')">Open</button>`).join("")}
-          </div>
-        </div>`).join("");
+          <div class="actions">${buttons}</div>
+        </div>`;
+      }).join("");
+    }
+
+    async function startProject(encPath, name) {
+      const path = decodeURIComponent(encPath);
+      let resp;
+      try { resp = await api("/api/projects/start", { method: "POST", body: JSON.stringify({ path }) }); }
+      catch (e) { alert("✗ " + e); return; }
+      streamJob(resp.job_id, "Starting " + name, "Starting…", "✓ Running!");
+    }
+
+    async function stopProject(encPath) {
+      const path = decodeURIComponent(encPath);
+      try { await api("/api/projects/stop", { method: "POST", body: JSON.stringify({ path }) }); }
+      catch (e) { alert("✗ " + e); }
+      loadLibrary();
+    }
+
+    async function removeProject(encPath, deleteFiles) {
+      const path = decodeURIComponent(encPath);
+      const msg = deleteFiles
+        ? `Permanently delete this project and its folder?\n\n${path}\n\nThis cannot be undone.`
+        : `Remove this project from My Projects?\n\nIts files stay on disk — you're just removing it from the list.`;
+      if (!confirm(msg)) return;
+      try {
+        await api("/api/projects", { method: "DELETE", body: JSON.stringify({ path, delete_files: deleteFiles }) });
+      } catch (e) { alert("✗ " + e); }
+      loadLibrary();
     }
 
     // --- settings / key ---

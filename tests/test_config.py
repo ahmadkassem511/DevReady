@@ -80,6 +80,20 @@ def test_openrouter_key_warning():
     assert openrouter_key_warning("garbage") is not None
 
 
+def test_unregister_project(tmp_path, monkeypatch):
+    _redirect_home(tmp_path, monkeypatch)
+    from devready.config import list_projects, register_project, unregister_project
+
+    register_project(tmp_path / "keep")
+    register_project(tmp_path / "drop")
+    assert unregister_project(tmp_path / "drop") is True
+    paths = [p["path"] for p in list_projects()]
+    assert str((tmp_path / "drop").resolve()) not in paths
+    assert str((tmp_path / "keep").resolve()) in paths
+    # Removing something not present returns False.
+    assert unregister_project(tmp_path / "never") is False
+
+
 def test_corrupt_config_falls_back_to_defaults(tmp_path, monkeypatch):
     _redirect_home(tmp_path, monkeypatch)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

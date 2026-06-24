@@ -169,6 +169,51 @@ def test_key_set_and_clear(client):
     assert client.get("/api/state", headers=h).json()["ai_configured"] is False
 
 
+def test_gui_relaunch_uses_devready_run(tmp_path, monkeypatch):
+    """The GUI 'Run' button must relaunch via `devready run` (the CLI path)."""
+    import sys
+
+    import devready.web.jobs as jobs_module
+
+    recorded = []
+
+    def fake_stream(self, command, job):
+        recorded.append(command)
+        return 0
+
+    monkeypatch.setattr(jobs_module.JobManager, "_stream", fake_stream)
+    mgr = jobs_module.JobManager()
+    job = mgr.start_relaunch(str(tmp_path / "proj"))
+    while True:
+        if job.queue.get(timeout=5) is jobs_module._DONE:
+            break
+    assert recorded[-1][:4] == [sys.executable, "-m", "devready", "run"]
+
+
+def test_delete_project_unregisters(client, tmp_path):
+    from devready.config import list_projects, register_project
+
+    proj = tmp_path / "old-proj"
+    proj.mkdir()
+    register_project(proj)
+    h = {"X-DevReady-Token": "testtoken"}
+    resp = client.request("DELETE", "/api/projects", headers=h, json={"path": str(proj), "delete_files": False})
+    assert resp.status_code == 200
+    assert str(proj.resolve()) not in [p["path"] for p in list_projects()]
+    assert proj.exists()  # files kept when delete_files is False
+
+
+def test_delete_refuses_files_outside_workspace(client, tmp_path):
+    # delete_files must never rmtree a path outside the DevReady workspace.
+    outside = tmp_path / "outside-project"
+    outside.mkdir()
+    (outside / "important.txt").write_text("keep me")
+    h = {"X-DevReady-Token": "testtoken"}
+    resp = client.request("DELETE", "/api/projects", headers=h, json={"path": str(outside), "delete_files": True})
+    assert resp.status_code == 400
+    assert outside.exists()  # not deleted
+
+
 def test_key_rejects_non_openrouter_key(client):
     # The GUI must reject an OpenAI key (sk-proj-...) with a helpful 400, and not
     # save it — this is the exact mistake that caused a silent 401 mid-setup.

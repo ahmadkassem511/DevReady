@@ -746,6 +746,24 @@ class Engine:
         project — never setup/install commands (which would imply, misleadingly,
         that setup still needs doing).
         """
+        targets = self._makefile_run_targets()
+        run_commands = self._readme_run_commands()
+
+        # Special case: a repo with no buildable stack whose README "run" commands
+        # are actually tool *installers* (e.g. `winget install ...`, `irm ... | iex`,
+        # `brew install --cask ...`). These projects aren't cloned-and-built — they're
+        # installed via a package manager — so say that plainly instead of implying
+        # a normal setup happened.
+        if not self.detections and run_commands and self._looks_like_tool_installer(run_commands):
+            console.print(
+                "  [info]This repo is a tool you install via a package manager, not a "
+                "project you clone and build.[/info]"
+            )
+            console.print("  To install it, run one of:")
+            for cmd in run_commands[:5]:
+                console.print(f"    [bold]{cmd}[/bold]")
+            return
+
         if self._install_ok:
             # Setup succeeded — say so plainly so "no URL" doesn't read as failure.
             console.print(
@@ -758,8 +776,6 @@ class Engine:
                 "see the messages above.[/warning]"
             )
 
-        targets = self._makefile_run_targets()
-        run_commands = self._readme_run_commands()
         if targets:
             console.print("  To run it, try:")
             for target in targets:
@@ -770,6 +786,22 @@ class Engine:
                 console.print(f"    [muted]{cmd}[/muted]")
         else:
             console.print("  [muted]See the project's README for how to run it.[/muted]")
+
+    # Command fragments that indicate "install this tool via a package manager"
+    # rather than "run this cloned project" — used to recognise repos that aren't
+    # meant to be cloned and built (e.g. the claude-code CLI).
+    _TOOL_INSTALLER_PATTERNS = (
+        "winget install", "brew install --cask", "scoop install", "choco install",
+        "| iex", "irm ", "iwr ", "| sh", "| bash", "snap install", "apt install",
+        "apt-get install", "npm install -g", "npm i -g", "pipx install",
+    )
+
+    def _looks_like_tool_installer(self, commands: List[str]) -> bool:
+        """True if the given commands are predominantly tool-installer invocations."""
+        return any(
+            any(pat in cmd.lower() for pat in self._TOOL_INSTALLER_PATTERNS)
+            for cmd in commands
+        )
 
     # Commands that are about *setting up* rather than *running* — we never show
     # these as "how to run it" (they'd imply setup isn't finished).

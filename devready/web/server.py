@@ -136,6 +136,63 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
             )
         return {"projects": out}
 
+    # -- API: project control panel (start / stop / delete) --------------
+    @app.post("/api/projects/start")
+    async def start_project(request: Request):
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        if not path or not Path(path).exists():
+            raise HTTPException(status_code=404, detail="Project folder not found.")
+        job = app.state.jobs.start_relaunch(path)
+        return {"job_id": job.id, "name": job.name}
+
+    @app.post("/api/projects/stop")
+    async def stop_project(request: Request):
+        from ..engine import Engine
+
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        Engine(project_dir=Path(path)).stop()
+        return {"ok": True}
+
+    @app.delete("/api/projects")
+    async def delete_project(request: Request):
+        """Remove a project from 'My Projects'; optionally delete its folder.
+
+        File deletion is only allowed inside the DevReady workspace, so we can
+        never rmtree an arbitrary path the registry happens to contain.
+        """
+        import shutil
+
+        from ..config import unregister_project
+        from ..engine import Engine
+        from .jobs import workspace_dir
+
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        delete_files = bool(body.get("delete_files"))
+        if not path:
+            raise HTTPException(status_code=400, detail="A project path is required.")
+
+        target = Path(path)
+        if delete_files and target.exists():
+            # Safety: only delete within the workspace dir.
+            try:
+                target.resolve().relative_to(workspace_dir().resolve())
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Refusing to delete files outside the DevReady workspace.",
+                )
+            try:
+                Engine(project_dir=target).stop()  # stop anything running first
+            except Exception:
+                pass
+            shutil.rmtree(target, ignore_errors=True)
+
+        unregister_project(target)
+        return {"ok": True}
+
     # -- API: install (start a job + stream its log) ----------------------
     @app.post("/api/install")
     async def install(request: Request):
@@ -147,8 +204,8 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
             raise HTTPException(status_code=400, detail=str(exc))
         return {"job_id": job.id, "name": job.name, "known": catalog.is_known_repo(repo_url)}
 
-    @app.get("/api/install/{job_id}/stream")
-    def install_stream(job_id: str):
+    @app.get("/api/jobs/{job_id}/stream")
+    def job_stream(job_id: str):
         job = app.state.jobs.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Unknown job")
