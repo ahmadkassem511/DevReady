@@ -291,6 +291,7 @@
       document.getElementById("i-title").textContent = "Installing " + resp.name;
       statusEl.textContent = "Working… this can take a few minutes.";
 
+      let finished = false;
       const es = new EventSource(`/api/install/${resp.job_id}/stream?token=${encodeURIComponent(TOKEN)}`);
       es.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
@@ -298,6 +299,8 @@
           logEl.textContent += msg.line + "\n";
           logEl.scrollTop = logEl.scrollHeight;
         } else if (msg.type === "done") {
+          if (finished) return;   // ignore any duplicate done frame
+          finished = true;
           es.close();
           if (msg.status === "success") {
             statusEl.textContent = "✓ Done!";

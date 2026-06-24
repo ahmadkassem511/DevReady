@@ -53,3 +53,49 @@ def test_tool_packages_have_make_mappings():
     assert TOOL_PACKAGES["make"]["choco"] == "make"
     assert TOOL_PACKAGES["make"]["brew"] == "make"
     assert TOOL_PACKAGES["make"]["apt"] == "make"
+
+
+def test_node_has_tool_mappings():
+    # Node must be auto-installable across the common managers (it bundles npm).
+    from devready.environment.system_deps import TOOL_PACKAGES
+
+    assert TOOL_PACKAGES["node"]["winget"] == "OpenJS.NodeJS.LTS"
+    assert TOOL_PACKAGES["node"]["choco"] == "nodejs-lts"
+    assert TOOL_PACKAGES["node"]["brew"] == "node"
+
+
+def test_ensure_node_short_circuits_when_npm_present(monkeypatch):
+    # When npm is already on PATH, ensure_node returns True without installing.
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd, "command_exists", lambda name: name == "npm")
+    called = {"install": False}
+    monkeypatch.setattr(sd, "install_tool", lambda name: called.__setitem__("install", True) or True)
+
+    assert sd.ensure_node() is True
+    assert called["install"] is False
+
+
+def test_ensure_node_installs_when_missing(monkeypatch):
+    # When npm is missing, ensure_node installs Node, then re-checks for npm.
+    import devready.environment.system_deps as sd
+
+    state = {"npm_present": False}
+    monkeypatch.setattr(sd, "command_exists", lambda name: state["npm_present"] if name == "npm" else False)
+
+    def fake_install(name):
+        assert name == "node"
+        state["npm_present"] = True  # the install made npm available
+        return True
+
+    monkeypatch.setattr(sd, "install_tool", fake_install)
+    assert sd.ensure_node() is True
+
+
+def test_ensure_node_reports_failure(monkeypatch):
+    # If npm still isn't there after an install attempt, ensure_node returns False.
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd, "command_exists", lambda name: False)
+    monkeypatch.setattr(sd, "install_tool", lambda name: False)
+    assert sd.ensure_node() is False

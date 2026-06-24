@@ -311,6 +311,16 @@ def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult
     """
     outcomes: List[CommandResult] = []
 
+    # Node may not be installed at all. Auto-install it (it bundles npm) so the
+    # project doesn't dead-end — the same philosophy as uv for Python. If we
+    # can't get npm onto PATH, stop here with a clear message instead of running
+    # `npm` and reporting a cryptic "command not found".
+    if not command_exists("npm"):
+        from . import system_deps
+
+        if not system_deps.ensure_node():
+            return outcomes
+
     # The command prefix used to run npm. When fnm is available and a specific
     # version is required, we route npm through `fnm exec` so the right Node is
     # used for THIS project only — the user's default Node is untouched.
@@ -340,7 +350,10 @@ def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult
     result_cmd = run_command(install_cmd, cwd=str(project_dir), capture=False)
     outcomes.append(result_cmd)
 
-    if not result_cmd.ok:
+    # A peer-dependency conflict is common and fixable; retry once with
+    # --legacy-peer-deps. (Exit 127 means npm itself wasn't found — a different
+    # problem we already tried to solve above — so retrying wouldn't help.)
+    if not result_cmd.ok and result_cmd.returncode != 127:
         console.print("  [warning]Install failed — retrying with --legacy-peer-deps…[/warning]")
         outcomes.append(
             run_command(

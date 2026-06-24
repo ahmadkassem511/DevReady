@@ -37,7 +37,8 @@ INSTALL_TEMPLATES = {
     "yum": ["sudo", "yum", "install", "-y", "{pkg}"],
     "pacman": ["sudo", "pacman", "-S", "--noconfirm", "{pkg}"],
     "choco": ["choco", "install", "-y", "{pkg}"],
-    "winget": ["winget", "install", "--accept-package-agreements", "{pkg}"],
+    "winget": ["winget", "install", "--accept-package-agreements",
+               "--accept-source-agreements", "{pkg}"],
     "scoop": ["scoop", "install", "{pkg}"],
 }
 
@@ -132,6 +133,13 @@ TOOL_PACKAGES = {
     },
     "just": {"choco": "just", "scoop": "just", "brew": "just", "pacman": "just"},
     "task": {"scoop": "task", "brew": "go-task", "choco": "go-task"},
+    # Node.js — installed when a project needs npm/node but neither is present.
+    # The package bundles npm, so installing this gives us both.
+    "node": {
+        "choco": "nodejs-lts", "scoop": "nodejs-lts", "winget": "OpenJS.NodeJS.LTS",
+        "brew": "node", "apt": "nodejs", "apt-get": "nodejs", "dnf": "nodejs",
+        "yum": "nodejs", "pacman": "nodejs",
+    },
 }
 
 # Where each package manager drops executables, so we can make a freshly
@@ -143,19 +151,69 @@ _MANAGER_BIN_DIRS = {
     "brew": ["/opt/homebrew/bin", "/usr/local/bin"],
 }
 
+# Install locations that aren't a manager's shim dir but where common tools land
+# (e.g. the Node installer drops node/npm here regardless of installer). Adding
+# these lets DevReady see a just-installed Node without a new terminal.
+_COMMON_TOOL_DIRS = [
+    r"C:\Program Files\nodejs",
+    os.path.expanduser(r"~\AppData\Roaming\npm"),
+]
 
-def _refresh_path(manager: str) -> None:
-    """Add a package manager's bin dir to this process's PATH after an install.
 
-    Newly installed tools land in a dir that's on PATH for *new* shells, but the
-    running process won't see it. Appending it here lets DevReady use the tool
-    immediately and continue, rather than asking the user to re-run.
+def _refresh_windows_path_from_registry() -> None:
+    """Re-read the persisted PATH from the Windows registry into this process.
+
+    Windows installers (choco/winget/the Node MSI) update the PATH stored in the
+    registry, but a process that's already running keeps its old copy. Merging
+    the registry's machine + user PATH back in lets DevReady use a tool that was
+    just installed, without telling the user to open a new terminal.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+    except ImportError:
+        return
+
+    sources = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        (winreg.HKEY_CURRENT_USER, "Environment"),
+    ]
+    current = os.environ.get("PATH", "")
+    known = set(current.split(os.pathsep))
+    for root, subkey in sources:
+        try:
+            with winreg.OpenKey(root, subkey) as key:
+                value, _ = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            continue
+        for directory in value.split(os.pathsep):
+            if directory and directory not in known:
+                current += os.pathsep + directory
+                known.add(directory)
+    os.environ["PATH"] = current
+
+
+def refresh_path() -> None:
+    """Re-discover tools that are installed but not on this process's PATH.
+
+    Adds every known package-manager shim dir and common tool install dir, then
+    (on Windows) merges the persisted registry PATH. This recovers tools that
+    *are* installed but invisible to the running process — e.g. when the GUI
+    server was launched from an environment with a stale or partial PATH.
     """
     path = os.environ.get("PATH", "")
-    for directory in _MANAGER_BIN_DIRS.get(manager, []):
+    extra = [d for dirs in _MANAGER_BIN_DIRS.values() for d in dirs] + _COMMON_TOOL_DIRS
+    for directory in extra:
         if directory and Path(directory).exists() and directory not in path:
             path = path + os.pathsep + directory
     os.environ["PATH"] = path
+    _refresh_windows_path_from_registry()
+
+
+def _refresh_path(manager: str) -> None:
+    """Make a freshly installed tool visible to the current process (see refresh_path)."""
+    refresh_path()
 
 
 def install_tool(name: str) -> bool:
@@ -192,6 +250,34 @@ def install_tool(name: str) -> bool:
     console.print(
         f"  [warning]{name} was installed but isn't visible yet on PATH. "
         f"Open a new terminal and re-run [bold]devready start[/bold].[/warning]"
+    )
+    return False
+
+
+def ensure_node() -> bool:
+    """Ensure ``node`` and ``npm`` are available, installing Node if they aren't.
+
+    This mirrors how DevReady auto-provisions Python: a project that needs npm
+    shouldn't dead-end just because Node isn't installed. Returns True when npm
+    is usable afterwards. We check ``npm`` specifically (not just ``node``)
+    because that's what the install step actually calls.
+    """
+    if command_exists("npm"):
+        return True
+    # Node may already be installed but invisible to this process's PATH (a
+    # common cause of the cryptic "npm: command not found"). Try to rediscover
+    # it before installing anything.
+    refresh_path()
+    if command_exists("npm"):
+        return True
+    console.print("  [warning]Node.js / npm not found — installing Node so setup can continue…[/warning]")
+    install_tool("node")  # installs Node (which bundles npm) and refreshes PATH
+    if command_exists("npm"):
+        console.print("  [success]Node.js is ready.[/success]")
+        return True
+    console.print(
+        "  [error]Couldn't make npm available automatically. Install Node.js from "
+        "https://nodejs.org and re-run.[/error]"
     )
     return False
 

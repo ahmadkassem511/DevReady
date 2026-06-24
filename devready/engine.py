@@ -126,8 +126,13 @@ class Engine:
     # =========================================================================
     # Public command: start (the full pipeline)
     # =========================================================================
-    def start(self) -> None:
-        """Run the complete setup pipeline, stopping early only on fatal errors."""
+    def start(self) -> bool:
+        """Run the complete setup pipeline.
+
+        Returns True when setup completed cleanly, False when a dependency
+        install step failed (so callers — the CLI, and the GUI subprocess — can
+        surface a real failure instead of a misleading success).
+        """
         print_banner("[bold cyan]DevReady[/bold cyan] — getting your project ready 🚀")
         console.print(f"[muted]Project: {self.project_dir}[/muted]")
 
@@ -142,6 +147,8 @@ class Engine:
         self._step_docker()
         self._step_migrations()
         self._step_launch()
+
+        return self._install_ok
 
     # =========================================================================
     # Public command: run (fast relaunch, no setup)
@@ -272,6 +279,11 @@ class Engine:
     # -- Step 4: Environment setup -------------------------------------------
     def _step_environment(self) -> None:
         print_step(4, TOTAL_STEPS, "Environment Setup")
+
+        # Re-discover tools that are installed but missing from this process's
+        # PATH (common when launched from the GUI). Cheap, and saves a needless
+        # reinstall of something the user already has.
+        system_deps.refresh_path()
 
         # 4a. Prefer the project's OWN setup method if it ships one (make setup,
         #     setup.sh, task setup, just setup). It's the authoritative way to

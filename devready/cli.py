@@ -89,7 +89,11 @@ def start(
     if not config.llm.is_configured:
         _show_openrouter_guide()
 
-    Engine(project_dir=path, config=config, assume_yes=yes).start()
+    ok = Engine(project_dir=path, config=config, assume_yes=yes).start()
+    # Exit non-zero when setup failed so automation (CI, the GUI's install job)
+    # can tell a real failure from a clean success.
+    if not ok:
+        raise typer.Exit(code=1)
 
 
 @app.command()
