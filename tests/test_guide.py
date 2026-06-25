@@ -67,7 +67,7 @@ def test_try_guided_launch_runs_documented_web_command(tmp_path, monkeypatch):
     eng = Engine(project_dir=tmp_path, config=_configured())
     captured = {}
 
-    def fake_launch(targets):
+    def fake_launch(targets, **kwargs):
         captured["cmd"] = targets[0]["command"]
         captured["port"] = targets[0]["port"]
         return ["http://localhost:8080"]
@@ -82,6 +82,50 @@ def test_try_guided_launch_runs_documented_web_command(tmp_path, monkeypatch):
     assert served == ["http://localhost:8080"]
     assert captured["cmd"] == ["make", "dev"]
     assert captured["port"] == 8080
+
+
+def test_guided_docker_launch_waits_patiently(tmp_path, monkeypatch):
+    # A Docker-based launch must wait a long time (slow first boot) and expect a
+    # detached server — and only after Docker is ensured running.
+    import devready.engine as engine_mod
+    from devready.environment import system_deps as sd
+
+    eng = Engine(project_dir=tmp_path, config=_configured())
+    captured = {}
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
+    monkeypatch.setattr(sd, "ensure_docker", lambda *a, **k: True)
+
+    def fake_launch(targets, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(eng, "_launch_targets", fake_launch)
+    eng._try_guided_launch(
+        {
+            "has_web_ui": True,
+            "launch_command": "docker compose up",
+            "url": "http://localhost:8080",
+            "tips": "",
+            "steps": [],
+        }
+    )
+    assert captured.get("port_timeout", 0) >= 300   # patient wait for slow boot
+    assert captured.get("expect_detached") is True   # `up` may return while it boots
+
+
+def test_guided_docker_launch_aborts_if_docker_unavailable(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    from devready.environment import system_deps as sd
+
+    eng = Engine(project_dir=tmp_path, config=_configured())
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
+    monkeypatch.setattr(sd, "ensure_docker", lambda *a, **k: False)  # couldn't start docker
+    monkeypatch.setattr(
+        eng, "_launch_targets", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not launch"))
+    )
+    assert eng._try_guided_launch(
+        {"has_web_ui": True, "launch_command": "docker compose up", "url": "http://localhost:8080"}
+    ) == []
 
 
 def test_try_guided_launch_skips_already_attempted(tmp_path, monkeypatch):

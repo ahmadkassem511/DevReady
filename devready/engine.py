@@ -598,11 +598,15 @@ class Engine:
 
         return targets
 
-    def _launch_targets(self, targets: List[dict]) -> List[str]:
+    def _launch_targets(
+        self, targets: List[dict], port_timeout: int = 25, expect_detached: bool = False
+    ) -> List[str]:
         """Spawn each target, wait for it, persist state, hand over URL(s).
 
         Returns the list of reachable web URLs (empty if nothing is serving), so
         the caller can decide whether to instead show a "how to use it" guide.
+        ``port_timeout``/``expect_detached`` are forwarded to each spawn (used to
+        wait patiently for slow, detached launches like Docker).
         """
         # Launch with the project's pinned Node on PATH (if any), so `npm run dev`
         # — and the pnpm/yarn its scripts invoke — use the right toolchain rather
@@ -612,7 +616,9 @@ class Engine:
         records: List[dict] = []
         for target in targets:
             self._attempted_commands.add(" ".join(target["command"]))
-            record = self._spawn_and_check(target, env=launch_env)
+            record = self._spawn_and_check(
+                target, env=launch_env, port_timeout=port_timeout, expect_detached=expect_detached
+            )
             if record:
                 records.append(record)
 
@@ -662,18 +668,27 @@ class Engine:
 
         return env
 
-    def _spawn_and_check(self, target: dict, env: Optional[dict] = None) -> Optional[dict]:
+    def _spawn_and_check(
+        self,
+        target: dict,
+        env: Optional[dict] = None,
+        port_timeout: int = 25,
+        expect_detached: bool = False,
+    ) -> Optional[dict]:
         """Start one component, watch for an immediate crash, and verify its port.
 
         Output is streamed to a per-component log file (never a PIPE, which could
         deadlock a chatty long-running server). ``env`` lets the launch run with a
-        pinned toolchain on PATH. Returns a state record on success, or None if it
-        crashed (with the error shown).
+        pinned toolchain on PATH. ``port_timeout`` is how long to wait for the
+        server to accept a connection (long for Docker, which boots slowly).
+        ``expect_detached`` means the launch command may exit 0 while the real
+        server keeps starting in the background (e.g. ``docker compose up -d``) —
+        so a clean exit isn't treated as failure and we still wait for the port.
 
+        Returns a state record on success, or None if it crashed (error shown).
         The record's ``port`` is set only if the server actually accepts a
-        connection — so we never report (or persist) a URL that 404s/refuses. The
-        guessed/announced port is kept in ``announced_port`` for an honest "still
-        starting" message.
+        connection — so we never report a URL that refuses. The expected port is
+        kept in ``announced_port`` for an honest "still starting" message.
         """
         name, cwd, command, port = target["name"], target["cwd"], target["command"], target["port"]
         label = "" if name == "root" else f" [{name}]"
@@ -694,18 +709,30 @@ class Engine:
             console.print(f"  [error]Failed to launch{label}: {exc}[/error]")
             return None
 
-        # Watch ~4s for an immediate crash (e.g. a wrong-version engine error).
+        # Watch ~4s for an immediate crash. A non-zero early exit is a real
+        # failure; a clean (0) exit when we expect a detached server is fine.
         for _ in range(8):
             time.sleep(0.5)
-            if process.poll() is not None:
-                console.print(f"  [error]{name} exited immediately (code {process.returncode}).[/error]")
-                self._print_log_tail(log_path)
-                console.print(f"  [muted]Full log: {log_path}[/muted]")
-                return None
+            rc = process.poll()
+            if rc is not None:
+                if rc != 0:
+                    console.print(f"  [error]{name} exited immediately (code {rc}).[/error]")
+                    self._print_log_tail(log_path)
+                    console.print(f"  [muted]Full log: {log_path}[/muted]")
+                    return None
+                break  # exited cleanly — likely a detached launcher; check the port
 
         # Prefer the port the server actually announces in its log over our guess.
         announced = self._detect_port_from_log(log_path, port)
-        reachable_port = announced if announced and self._wait_for_port(announced) else None
+        # If the launcher already exited cleanly and we did NOT expect a detached
+        # server, it was a one-shot task (a build) — don't block on a port.
+        effective_timeout = port_timeout
+        if process.poll() is not None and not expect_detached:
+            effective_timeout = min(port_timeout, 5)
+
+        reachable_port = None
+        if announced and self._wait_for_port(announced, timeout=effective_timeout, label=name):
+            reachable_port = announced
         return {
             "name": name,
             "pid": process.pid,
@@ -1022,7 +1049,8 @@ class Engine:
 
         # If running this needs Docker, make it available first (install + start),
         # treating Docker as a normal dependency.
-        if self._guide_needs_docker(guide, cmd_str):
+        needs_docker = self._guide_needs_docker(guide, cmd_str)
+        if needs_docker:
             if not system_deps.ensure_docker():
                 console.print(
                     "  [warning]This project needs Docker to run — see the steps below.[/warning]"
@@ -1040,13 +1068,29 @@ class Engine:
         console.print(
             f"\n  The project's documented way to run is [bold]{cmd_str}[/bold] — starting it for you…"
         )
+        # Docker-based apps boot slowly on first run (pulling images, starting a
+        # database), and the launcher often returns while containers keep coming
+        # up. Tell the user it'll take a bit, wait patiently (with progress), and
+        # open the browser the moment the server actually answers.
+        if needs_docker:
+            console.print(
+                "  [info]This project runs in Docker — the first start can take several minutes "
+                "(downloading images, starting services). Please keep this window open; "
+                "DevReady will open your browser automatically as soon as it's ready.[/info]"
+            )
+            port_timeout, expect_detached = 360, True
+        else:
+            port_timeout, expect_detached = 60, False
+
         target = {
             "name": "root",
             "cwd": str(self.project_dir),
             "command": cmd_str.split(),
             "port": port,
         }
-        return self._launch_targets([target])
+        return self._launch_targets(
+            [target], port_timeout=port_timeout, expect_detached=expect_detached
+        )
 
     def _render_guide(self, guide: dict) -> None:
         """Print the project guide dict produced by :meth:`_project_guide`."""
@@ -1168,14 +1212,27 @@ class Engine:
         return None
 
     @staticmethod
-    def _wait_for_port(port: int, timeout: int = 25) -> bool:
-        """Block until ``port`` accepts a TCP connection, or ``timeout`` elapses."""
+    def _wait_for_port(port: int, timeout: int = 25, label: Optional[str] = None) -> bool:
+        """Block until ``port`` accepts a TCP connection, or ``timeout`` elapses.
+
+        For long waits (e.g. Docker booting) a ``label`` enables periodic progress
+        notices every ~20s, so the user knows DevReady is still working and will
+        open the browser as soon as the server answers.
+        """
         deadline = time.time() + timeout
+        next_notice = time.time() + 20
         while time.time() < deadline:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(1)
                 if sock.connect_ex(("127.0.0.1", port)) == 0:
                     return True
+            if label and time.time() >= next_notice:
+                remaining = max(0, int(deadline - time.time()))
+                console.print(
+                    f"  [muted]…still waiting for {label} on port {port} to come up "
+                    f"(up to ~{remaining}s more)…[/muted]"
+                )
+                next_notice = time.time() + 20
             time.sleep(0.5)
         return False
 
