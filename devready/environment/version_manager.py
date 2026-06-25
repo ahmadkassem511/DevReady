@@ -337,11 +337,14 @@ def setup_node(project_dir: Path, result: DetectionResult, healer=None) -> List[
         if not system_deps.ensure_node():
             return outcomes
 
-    # The command prefix used to run the package manager. When the project pins a
-    # Node version the current one doesn't meet, we route through `fnm exec` so
-    # the right Node is used for THIS project only — the user's default Node is
-    # untouched. fnm itself is auto-installed if needed.
-    npm_prefix: List[str] = []
+    # When the project pins a Node version the current one doesn't meet, we make
+    # the right Node available for THIS project only — the user's default Node is
+    # untouched. Rather than prefixing every command with `fnm exec` (which on
+    # Windows can't spawn the .cmd shims npm/corepack/pnpm are), we put the pinned
+    # Node's own bin dir on PATH and spawn the package manager ourselves — so
+    # DevReady's .cmd resolution works. fnm is auto-installed if needed.
+    node_env: Optional[dict] = None  # custom environment with the pinned Node first
+    npm_prefix: List[str] = []        # fallback prefix when we can't get the bin dir
 
     if result.version and not _node_satisfies(result.version):
         if not command_exists("fnm") and not command_exists("nvm"):
@@ -357,7 +360,14 @@ def setup_node(project_dir: Path, result: DetectionResult, healer=None) -> List[
             inst = run_command(["fnm", "install", result.version], capture=False)
             outcomes.append(inst)
             if inst.ok:
-                npm_prefix = ["fnm", "exec", "--using", result.version, "--"]
+                bin_dir = _fnm_node_bin_dir(result.version)
+                if bin_dir:
+                    node_env = os.environ.copy()
+                    node_env["PATH"] = bin_dir + os.pathsep + node_env.get("PATH", "")
+                    console.print(f"  Using Node {result.version} from fnm for this project.")
+                else:
+                    # Couldn't resolve the bin dir — fall back to the exec prefix.
+                    npm_prefix = ["fnm", "exec", "--using", result.version, "--"]
             else:
                 console.print(
                     f"  [warning]Couldn't install Node {result.version} via fnm — "
@@ -382,19 +392,23 @@ def setup_node(project_dir: Path, result: DetectionResult, healer=None) -> List[
     # "packageManager", or engines) and provisions exactly that — so a project
     # needing pnpm 10 isn't run with a stale global pnpm 9. It also needs no
     # global shims or admin rights. We disable the interactive download prompt
-    # so an unattended run never hangs.
+    # so an unattended run never hangs. corepack is looked up on the *effective*
+    # PATH (the pinned Node's, when one is active) — not the system default.
+    search_path = node_env.get("PATH") if node_env else None
+    if node_env is not None:
+        node_env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
+    else:
+        os.environ.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+
     pm_runner: List[str] = [pm]
     if pm != "npm":
-        if command_exists("corepack"):
-            os.environ.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
+        if _which_on_path("corepack", search_path):
             pm_runner = ["corepack", pm]
-        elif not command_exists(pm):
+        elif not _which_on_path(pm, search_path):
             console.print(f"  [warning]{pm} isn't available — using npm instead.[/warning]")
             pm = "npm"
 
-    if pm == "yarn":
-        install_cmd = npm_prefix + pm_runner + ["install"]
-    elif pm == "pnpm":
+    if pm in ("yarn", "pnpm"):
         install_cmd = npm_prefix + pm_runner + ["install"]
     else:
         has_lockfile = (project_dir / "package-lock.json").exists()
@@ -405,11 +419,13 @@ def setup_node(project_dir: Path, result: DetectionResult, healer=None) -> List[
         # The healer streams + captures, does the --legacy-peer-deps retry, and
         # (with an LLM key) diagnoses anything else that fails.
         outcomes.append(
-            healer.run_step(install_cmd, cwd=str(project_dir), description="npm install")
+            healer.run_step(
+                install_cmd, cwd=str(project_dir), description="npm install", env=node_env
+            )
         )
         return outcomes
 
-    result_cmd = run_command(install_cmd, cwd=str(project_dir), capture=False)
+    result_cmd = run_command(install_cmd, cwd=str(project_dir), capture=False, env=node_env)
     outcomes.append(result_cmd)
 
     # A peer-dependency conflict is common and fixable; retry once with
@@ -422,6 +438,7 @@ def setup_node(project_dir: Path, result: DetectionResult, healer=None) -> List[
                 npm_prefix + ["npm", "install", "--legacy-peer-deps"],
                 cwd=str(project_dir),
                 capture=False,
+                env=node_env,
             )
         )
 
@@ -435,6 +452,36 @@ def _node_package_manager(project_dir: Path) -> str:
     if (project_dir / "yarn.lock").exists():
         return "yarn"
     return "npm"
+
+
+def _which_on_path(name: str, path: Optional[str]) -> bool:
+    """True if ``name`` is found on ``path`` (or the default PATH when None).
+
+    Unlike ``command_exists``, this can search a specific PATH — used to check
+    whether corepack/pnpm exist inside a pinned Node's bin dir rather than the
+    system default.
+    """
+    return shutil.which(name, path=path) is not None
+
+
+def _fnm_node_bin_dir(version: str) -> Optional[str]:
+    """Return the bin directory of the fnm-managed Node for ``version``.
+
+    We ask fnm to run ``node`` (which it *can* spawn — it's ``node.exe``) and
+    print its own executable directory. Putting that dir on PATH lets DevReady
+    invoke npm/corepack/pnpm itself, sidestepping fnm's inability to spawn the
+    ``.cmd`` shims those tools are on Windows. Returns None if it can't be found.
+    """
+    res = run_command(
+        [
+            "fnm", "exec", "--using", version, "--",
+            "node", "-e", "process.stdout.write(require('path').dirname(process.execPath))",
+        ]
+    )
+    if not res.ok or not res.stdout.strip():
+        return None
+    path = res.stdout.strip().splitlines()[-1].strip()
+    return path if path and Path(path).exists() else None
 
 
 def _node_version() -> Optional[str]:

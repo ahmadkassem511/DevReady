@@ -61,7 +61,11 @@ def test_windows_executable_resolution(monkeypatch):
     import devready.utils as utils
 
     monkeypatch.setattr(utils.sys, "platform", "win32")
-    monkeypatch.setattr(utils.shutil, "which", lambda name: r"C:\Program Files\nodejs\npm.CMD" if name == "npm" else None)
+    monkeypatch.setattr(
+        utils.shutil,
+        "which",
+        lambda name, path=None: r"C:\Program Files\nodejs\npm.CMD" if name == "npm" else None,
+    )
 
     assert utils._resolve_windows_executable(["npm", "install"]) == [r"C:\Program Files\nodejs\npm.CMD", "install"]
     # Unknown command is left unchanged (so the normal 127 path still applies).

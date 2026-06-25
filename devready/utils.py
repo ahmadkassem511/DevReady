@@ -76,7 +76,9 @@ class CommandResult:
         return self.returncode == 0
 
 
-def _resolve_windows_executable(command: Sequence[str] | str) -> Sequence[str] | str:
+def _resolve_windows_executable(
+    command: Sequence[str] | str, path: Optional[str] = None
+) -> Sequence[str] | str:
     """Resolve a bare tool name to its full path on Windows.
 
     Console tools like ``npm``/``npx``/``yarn``/``pnpm`` are ``.cmd``/``.bat``
@@ -85,10 +87,13 @@ def _resolve_windows_executable(command: Sequence[str] | str) -> Sequence[str] |
     ``["npm", "install"]`` raises FileNotFoundError even though npm is installed.
     Resolving the real path (which honours PATHEXT and finds ``npm.cmd``) makes
     these run correctly. Harmless for ``.exe`` targets and for absolute paths.
+
+    ``path`` overrides which PATH to search — used when running a tool from a
+    specific runtime (e.g. an fnm-managed Node's bin dir) that isn't the default.
     """
     if sys.platform != "win32" or isinstance(command, str) or not command:
         return command
-    resolved = shutil.which(command[0])
+    resolved = shutil.which(command[0], path=path)
     return [resolved, *command[1:]] if resolved else command
 
 
@@ -99,6 +104,7 @@ def run_command(
     capture: bool = True,
     shell: bool = False,
     timeout: Optional[int] = None,
+    env: Optional[dict] = None,
 ) -> CommandResult:
     """Run an external command safely and return a structured result.
 
@@ -123,8 +129,10 @@ def run_command(
     """
     display = command if isinstance(command, str) else " ".join(command)
     # On Windows, resolve .cmd/.bat shims (npm, npx, yarn…) to a launchable path.
+    # When a custom env is given, search its PATH so a tool from that runtime
+    # (e.g. an fnm-managed Node's corepack) resolves correctly.
     if not shell:
-        command = _resolve_windows_executable(command)
+        command = _resolve_windows_executable(command, path=(env or {}).get("PATH"))
     try:
         completed = subprocess.run(
             command,
@@ -133,6 +141,7 @@ def run_command(
             capture_output=capture,
             text=True,  # decode bytes to str using the default encoding
             timeout=timeout,
+            env=env,
         )
         return CommandResult(
             command=display,
@@ -154,6 +163,7 @@ def run_command_teed(
     shell: bool = False,
     timeout: Optional[int] = None,
     max_capture_lines: int = 400,
+    env: Optional[dict] = None,
 ) -> CommandResult:
     """Run a command, streaming its output live AND capturing the tail.
 
@@ -171,7 +181,7 @@ def run_command_teed(
 
     display = command if isinstance(command, str) else " ".join(command)
     if not shell:
-        command = _resolve_windows_executable(command)
+        command = _resolve_windows_executable(command, path=(env or {}).get("PATH"))
 
     captured: "deque[str]" = deque(maxlen=max_capture_lines)
     try:
@@ -184,6 +194,7 @@ def run_command_teed(
             text=True,
             bufsize=1,  # line-buffered, so live output isn't withheld
             errors="replace",
+            env=env,
         )
     except FileNotFoundError:
         return CommandResult(command=display, returncode=127, stderr="command not found")

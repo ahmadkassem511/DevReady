@@ -90,14 +90,17 @@ class InstallHealer:
         *,
         cwd: Optional[str] = None,
         description: str = "install",
+        env: Optional[dict] = None,
     ) -> CommandResult:
         """Run an install command, healing and retrying on failure.
 
         Streams output live while capturing it (so we can diagnose a failure),
-        applies built-in retries, then the LLM loop. Returns the final result.
+        applies built-in retries, then the LLM loop. ``env`` is forwarded to the
+        subprocess (used to run a pinned-version runtime's tools). Returns the
+        final result.
         """
         cwd = cwd or str(self.project_dir)
-        result = run_command_teed(command, cwd=cwd)
+        result = run_command_teed(command, cwd=cwd, env=env)
         if result.ok:
             return result
 
@@ -106,13 +109,13 @@ class InstallHealer:
             console.print(
                 f"  [warning]{description} failed — retrying: {' '.join(retry)}[/warning]"
             )
-            result = run_command_teed(retry, cwd=cwd)
+            result = run_command_teed(retry, cwd=cwd, env=env)
             if result.ok:
                 return result
 
         # 2. LLM-guided healing loop (only if a key is configured).
         if self.config.llm.is_configured:
-            result = self._heal_loop(list(command), cwd, result, description)
+            result = self._heal_loop(list(command), cwd, result, description, env)
         return result
 
     # -- built-in (offline) retries ------------------------------------------
@@ -135,7 +138,12 @@ class InstallHealer:
 
     # -- LLM healing loop ----------------------------------------------------
     def _heal_loop(
-        self, command: List[str], cwd: str, last: CommandResult, description: str
+        self,
+        command: List[str],
+        cwd: str,
+        last: CommandResult,
+        description: str,
+        env: Optional[dict] = None,
     ) -> CommandResult:
         """Ask the LLM for fixes and retry, up to MAX_HEAL_ATTEMPTS times."""
         from .client import ask_llm_json
@@ -172,7 +180,7 @@ class InstallHealer:
                 current = replacement
 
             console.print(f"  [info]Retrying {description} after the fix…[/info]")
-            result = run_command_teed(current, cwd=cwd)
+            result = run_command_teed(current, cwd=cwd, env=env)
             if result.ok:
                 console.print("  [success]Recovered — the install succeeded after the AI fix.[/success]")
                 return result
