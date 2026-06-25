@@ -323,7 +323,10 @@ class Engine:
                             f"  See the diagnosis above. You can run the command manually for the "
                             f"full output.[/warning]"
                         )
-                self._install_ok = all(o.ok for o in outcomes) if outcomes else self._install_ok
+                # Accumulate: once any language's install fails, the run is not
+                # OK — a later language succeeding must not mask an earlier failure.
+                if outcomes:
+                    self._install_ok = self._install_ok and all(o.ok for o in outcomes)
         else:
             console.print("  [muted]No known stack at the project root.[/muted]")
 

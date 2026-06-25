@@ -177,6 +177,11 @@ TOOL_PACKAGES = {
         "brew": "composer", "apt": "composer", "apt-get": "composer",
         "dnf": "composer", "yum": "composer", "pacman": "composer",
     },
+    "php": {  # PHP runtime — composer is just a .phar that needs php to run.
+        "choco": "php", "scoop": "php", "winget": "PHP.PHP",
+        "brew": "php", "apt": "php-cli", "apt-get": "php-cli", "dnf": "php-cli",
+        "yum": "php-cli", "pacman": "php",
+    },
     "dotnet": {
         "choco": "dotnet-sdk", "scoop": "dotnet-sdk", "winget": "Microsoft.DotNet.SDK.8",
         "brew": "dotnet", "apt": "dotnet-sdk-8.0", "apt-get": "dotnet-sdk-8.0",

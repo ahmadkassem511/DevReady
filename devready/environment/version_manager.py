@@ -616,7 +616,23 @@ def setup_ruby(project_dir: Path, result: DetectionResult, healer=None) -> List[
 
 
 def setup_php(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
-    """Install a PHP project's dependencies with Composer."""
+    """Install a PHP project's dependencies with Composer.
+
+    Composer is a PHP application (a ``.phar``) — it can't run without the PHP
+    runtime. So we ensure ``php`` is installed *before* composer, otherwise
+    ``composer install`` dies with "php is not recognized".
+    """
+    from . import system_deps
+
+    if not command_exists("php"):
+        console.print("  PHP project, but the PHP runtime isn't installed — installing it…")
+        if not system_deps.install_tool("php"):
+            console.print(
+                "  [warning]Couldn't install PHP automatically. "
+                "Install it (https://www.php.net/downloads) and re-run.[/warning]"
+            )
+            return []
+
     return _toolchain_setup(
         project_dir,
         language="PHP",

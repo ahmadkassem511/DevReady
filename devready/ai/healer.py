@@ -104,8 +104,9 @@ class InstallHealer:
         if result.ok:
             return result
 
-        # 1. Cheap, offline, high-hit-rate retries first.
-        for retry in self._builtin_retries(command):
+        # 1. Cheap, offline, high-hit-rate retries first. These cover the most
+        #    common real-world failures deterministically — no LLM needed.
+        for retry in self._builtin_retries(command, result.stdout):
             console.print(
                 f"  [warning]{description} failed — retrying: {' '.join(retry)}[/warning]"
             )
@@ -119,22 +120,45 @@ class InstallHealer:
         return result
 
     # -- built-in (offline) retries ------------------------------------------
-    @staticmethod
-    def _builtin_retries(command: Sequence[str]) -> List[List[str]]:
-        """Return cheap retry variants for a failed command, most-likely first."""
+    def _builtin_retries(self, command: Sequence[str], error_text: str = "") -> List[List[str]]:
+        """Return cheap retry variants for a failed command, most-likely first.
+
+        These encode the well-known escape hatches for the dependency managers so
+        DevReady fixes the common cases itself:
+          * pip — relax the resolver when a pin conflict blocks the install.
+          * npm — when ``npm ci`` fails (a stale/desynced lockfile is extremely
+            common), fall back to ``npm install`` to regenerate it; when a
+            lifecycle script fails (e.g. a Unix ``postinstall`` shell script on
+            Windows), retry with ``--ignore-scripts`` so dependencies still land;
+            and ``--legacy-peer-deps`` for peer-dependency conflicts.
+        Any retry identical to the original command is dropped.
+        """
         cmd = list(command)
         joined = " ".join(cmd).lower()
         retries: List[List[str]] = []
+
         if "-m pip install" in joined or joined.startswith(("pip ", "pip3 ")):
-            # Relaxed resolver fixes most "incompatible pin" failures.
             retries.append(cmd + ["--upgrade-strategy", "only-if-needed"])
-        if joined.endswith(("npm install", "npm ci")) or " npm install" in joined:
-            # Peer-dependency conflicts are common and this resolves them.
-            base = [c for c in cmd if c != "ci"]
+
+        if "npm" in joined and ("install" in joined or "ci" in joined):
+            # Normalise `npm ci` → `npm install`: ci aborts on any lockfile
+            # mismatch, whereas install repairs the lockfile.
+            base = ["install" if part == "ci" else part for part in cmd]
             if "install" not in base:
                 base.append("install")
+            # Escalating fallbacks, broadest-but-safest last. --ignore-scripts is
+            # the key one for repos whose postinstall runs a Unix shell script.
+            retries.append(base)
+            retries.append(base + ["--ignore-scripts"])
             retries.append(base + ["--legacy-peer-deps"])
-        return retries
+            retries.append(base + ["--legacy-peer-deps", "--ignore-scripts", "--no-audit", "--no-fund"])
+
+        # Drop any retry that is just the original command, and de-duplicate.
+        unique: List[List[str]] = []
+        for r in retries:
+            if r != cmd and r not in unique:
+                unique.append(r)
+        return unique
 
     # -- LLM healing loop ----------------------------------------------------
     def _heal_loop(
@@ -175,7 +199,7 @@ class InstallHealer:
             if not actions:
                 break
 
-            replacement = self._apply_actions(actions, cwd)
+            replacement = self._apply_actions(actions, cwd, env)
             if replacement:
                 current = replacement
 
@@ -239,8 +263,15 @@ class InstallHealer:
                     console.print(f"  [muted]Skipping an unsafe suggested command: {cmd}[/muted]")
         return actions
 
-    def _apply_actions(self, actions: List[FixAction], cwd: str) -> Optional[List[str]]:
-        """Apply each fix. Returns a replacement install command, if one was given."""
+    def _apply_actions(
+        self, actions: List[FixAction], cwd: str, env: Optional[dict] = None
+    ) -> Optional[List[str]]:
+        """Apply each fix. Returns a replacement install command, if one was given.
+
+        ``env`` is forwarded so a ``run`` fix uses the same (possibly pinned)
+        toolchain as the install it's repairing — otherwise a fix could run on
+        the wrong Node/Python and reintroduce the very error it's meant to cure.
+        """
         from ..environment import system_deps
 
         replacement: Optional[List[str]] = None
@@ -256,9 +287,11 @@ class InstallHealer:
             elif action.type == "set_env":
                 console.print(f"  [info]Setting {action.name} for this run.[/info]")
                 os.environ[action.name] = action.value
+                if env is not None:
+                    env[action.name] = action.value
             elif action.type == "run":
                 console.print(f"  [info]Running fix: {action.command}[/info]")
-                run_command_teed(action.command, cwd=cwd, shell=True)
+                run_command_teed(action.command, cwd=cwd, shell=True, env=env)
             elif action.type == "replace_install":
                 console.print(f"  [info]Adjusting the install command: {action.command}[/info]")
                 replacement = action.command.split()

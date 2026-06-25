@@ -40,15 +40,32 @@ def test_is_safe_command_rejects_destructive_and_piped():
 
 
 # -- built-in offline retries -------------------------------------------------
-def test_builtin_retries_pip_relaxed():
-    retries = InstallHealer._builtin_retries(["py", "-m", "pip", "install", "-r", "requirements.txt"])
+def test_builtin_retries_pip_relaxed(tmp_path):
+    h = InstallHealer(_unconfigured(), tmp_path)
+    retries = h._builtin_retries(["py", "-m", "pip", "install", "-r", "requirements.txt"])
     assert any("only-if-needed" in " ".join(r) for r in retries)
 
 
-def test_builtin_retries_npm_legacy_peer_deps():
-    retries = InstallHealer._builtin_retries(["npm", "ci"])
-    joined = [" ".join(r) for r in retries]
-    assert any("--legacy-peer-deps" in j and "install" in j for j in joined)
+def test_builtin_retries_npm_ci_falls_back_to_install_and_ignore_scripts(tmp_path):
+    # The two highest-value npm escape hatches: `npm ci` -> `npm install`
+    # (repairs a desynced lockfile) and `--ignore-scripts` (skips a postinstall
+    # shell script that can't run on Windows). Both must be offered.
+    h = InstallHealer(_unconfigured(), tmp_path)
+    retries = [" ".join(r) for r in h._builtin_retries(["npm", "ci"])]
+    assert any(r == "npm install" for r in retries)            # regenerate lockfile
+    assert any("--ignore-scripts" in r for r in retries)        # skip lifecycle scripts
+    assert any("--legacy-peer-deps" in r for r in retries)      # peer conflicts
+    # `ci` must have been rewritten to `install` everywhere.
+    assert all("npm ci" not in r for r in retries)
+
+
+def test_builtin_retries_drop_identical_to_original(tmp_path):
+    # If the command is already `npm install`, we must not "retry" the exact same
+    # thing — only genuinely different variants.
+    h = InstallHealer(_unconfigured(), tmp_path)
+    retries = [" ".join(r) for r in h._builtin_retries(["npm", "install"])]
+    assert "npm install" not in retries
+    assert any("--ignore-scripts" in r for r in retries)
 
 
 # -- run_step: success path ---------------------------------------------------

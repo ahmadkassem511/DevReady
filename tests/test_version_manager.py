@@ -122,6 +122,24 @@ def test_setup_node_pinned_version_puts_bin_on_path_not_fnm_exec(tmp_path, monke
     assert kwargs["env"]["PATH"].startswith(str(bin_dir))  # pinned Node's bin is first
 
 
+def test_setup_php_installs_runtime_before_composer(tmp_path, monkeypatch):
+    # composer is a PHP app; PHP must be installed too, or `composer install`
+    # dies with "php is not recognized". Both runtime and manager must install.
+    import devready.environment.system_deps as sd
+    import devready.environment.version_manager as vm
+    from devready.detectors import DetectionResult
+
+    installed = []
+    monkeypatch.setattr(vm, "command_exists", lambda n: False)  # neither php nor composer present
+    monkeypatch.setattr(sd, "install_tool", lambda name: installed.append(name) or True)
+    monkeypatch.setattr(vm, "run_command", lambda *a, **k: vm.CommandResult(command="x", returncode=0))
+
+    result = DetectionResult(language="PHP", version="8.3", frameworks=[], package_files=["composer.json"])
+    vm.setup_php(tmp_path, result)
+    assert "php" in installed       # the runtime
+    assert "composer" in installed  # and the package manager
+
+
 def test_parse_version_major_minor():
     assert _parse_version("3.11") == (3, 11)
 
