@@ -482,23 +482,55 @@ def _which_on_path(name: str, path: Optional[str]) -> bool:
     return shutil.which(name, path=path) is not None
 
 
+def _git_bash() -> Optional[str]:
+    """Locate a *real* Git Bash, never ``C:\\Windows\\System32\\bash.exe``.
+
+    System32's ``bash.exe`` is the WSL launcher; on a machine with no WSL distro
+    it fails with ``WSL_E_DEFAULT_DISTRO_NOT_FOUND``. Since System32 is usually
+    early on PATH, a bare ``which("bash")`` finds that stub first — so we skip it
+    and resolve Git Bash from git's own location / the standard install dirs.
+    """
+    candidate = shutil.which("bash")
+    if candidate and "system32" not in candidate.lower():
+        return candidate
+
+    roots: List[Path] = []
+    git = shutil.which("git")
+    if git:
+        # …/Git/cmd/git.exe or …/Git/mingw64/bin/git.exe → walk up to …/Git
+        p = Path(git).resolve()
+        roots += [p.parent.parent, p.parent.parent.parent]
+    roots += [
+        Path(r"C:\Program Files\Git"),
+        Path(r"C:\Program Files (x86)\Git"),
+        Path(os.path.expanduser(r"~\AppData\Local\Programs\Git")),
+        Path(os.path.expanduser(r"~\scoop\apps\git\current")),
+    ]
+    for root in roots:
+        for rel in ("bin/bash.exe", "usr/bin/bash.exe"):
+            bash = root / rel
+            if bash.exists():
+                return str(bash)
+    return None
+
+
 def needs_bash_script_shell(project_dir: Path) -> Optional[str]:
     """Return a bash path to use as npm's ``script-shell``, or None.
 
     On Windows, npm runs ``package.json`` scripts through ``cmd.exe`` by default.
     Repos written for Unix put shell scripts in their lifecycle/run scripts
     (e.g. ``"postinstall": "build/foo.sh"``), which cmd can't execute —
-    ``'build' is not recognized…``. When such a project is detected *and* a bash
-    is available (Git Bash), pointing npm's ``script-shell`` at bash lets those
-    scripts run for real, for both ``npm install``'s lifecycle scripts and
-    ``npm run`` at launch — rather than skipping them.
+    ``'build' is not recognized…``. When such a project is detected *and* Git
+    Bash is available, pointing npm's ``script-shell`` at it lets those scripts
+    run for real, for both ``npm install``'s lifecycle scripts and ``npm run`` at
+    launch — rather than skipping them.
 
     Returns None when not needed: non-Windows (sh already handles ``.sh``), no
-    bash on PATH, or the project has no shell-script npm scripts.
+    Git Bash available, or the project has no shell-script npm scripts.
     """
     if sys.platform != "win32":
         return None
-    bash = shutil.which("bash")
+    bash = _git_bash()
     if not bash:
         return None
     pkg = project_dir / "package.json"
@@ -659,12 +691,89 @@ def setup_ruby(project_dir: Path, result: DetectionResult, healer=None) -> List[
     return outcomes
 
 
+# Extensions composer and most PHP apps need. A freshly-installed PHP (esp. via
+# scoop/winget) often ships the DLLs but with no active php.ini, so they're off —
+# which makes `composer install` die with "the openssl extension is required".
+_PHP_COMMON_EXTENSIONS = [
+    "openssl", "curl", "mbstring", "fileinfo", "zip", "gd", "intl",
+    "pdo_mysql", "pdo_sqlite", "sodium", "bcmath", "exif", "gmp",
+]
+
+
+def ensure_php_extensions() -> None:
+    """Make sure PHP has an active php.ini with the common extensions enabled.
+
+    Locates the real PHP via ``PHP_BINARY``; creates ``php.ini`` from the bundled
+    production template if none is loaded; sets ``extension_dir`` and enables each
+    common extension whose DLL is actually shipped. Idempotent and best-effort —
+    never raises. This is what lets ``composer install`` (which needs openssl)
+    and most PHP apps work on a fresh Windows PHP.
+    """
+    if not command_exists("php"):
+        return
+    res = run_command(["php", "-r", "echo PHP_BINARY;"])
+    php_exe = res.stdout.strip().splitlines()[-1].strip() if res.ok and res.stdout.strip() else ""
+    if not php_exe or not Path(php_exe).exists():
+        return
+    php_dir = Path(php_exe).parent
+    ini = php_dir / "php.ini"
+
+    if not ini.exists():
+        template = next(
+            (php_dir / name for name in ("php.ini-production", "php.ini-development")
+             if (php_dir / name).exists()),
+            None,
+        )
+        try:
+            ini.write_text(
+                template.read_text(encoding="utf-8", errors="replace") if template else "",
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+    try:
+        text = ini.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    original = text
+
+    ext_dir = php_dir / "ext"
+    if ext_dir.exists():
+        if re.search(r'^\s*;\s*extension_dir\s*=\s*"ext"', text, re.M):
+            text = re.sub(r'^\s*;\s*extension_dir\s*=\s*"ext"', 'extension_dir = "ext"', text, flags=re.M)
+        elif not re.search(r'^\s*extension_dir\s*=', text, re.M):
+            text += f'\nextension_dir = "{ext_dir}"\n'
+
+    enabled = []
+    for ext in _PHP_COMMON_EXTENSIONS:
+        # Only enable extensions whose DLL is actually present (Windows: php_<ext>.dll).
+        if ext_dir.exists() and not (ext_dir / f"php_{ext}.dll").exists():
+            continue
+        commented = re.compile(rf'^\s*;\s*extension\s*=\s*{re.escape(ext)}\s*$', re.M)
+        if commented.search(text):
+            text = commented.sub(f"extension={ext}", text)
+            enabled.append(ext)
+        elif not re.search(rf'^\s*extension\s*=\s*{re.escape(ext)}\s*$', text, re.M):
+            text += f"\nextension={ext}\n"
+            enabled.append(ext)
+
+    if text != original:
+        try:
+            ini.write_text(text, encoding="utf-8")
+            console.print(f"  Enabled PHP extensions ({', '.join(enabled)}) so composer/PHP work.")
+        except OSError:
+            pass
+
+
 def setup_php(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Install a PHP project's dependencies with Composer.
 
     Composer is a PHP application (a ``.phar``) — it can't run without the PHP
-    runtime. So we ensure ``php`` is installed *before* composer, otherwise
-    ``composer install`` dies with "php is not recognized".
+    runtime, and it needs the openssl extension to fetch packages over HTTPS. So
+    we ensure ``php`` is installed *and* its common extensions are enabled before
+    running composer, otherwise ``composer install`` dies with "php is not
+    recognized" or "the openssl extension is required".
     """
     from . import system_deps
 
@@ -676,6 +785,8 @@ def setup_php(project_dir: Path, result: DetectionResult, healer=None) -> List[C
                 "Install it (https://www.php.net/downloads) and re-run.[/warning]"
             )
             return []
+
+    ensure_php_extensions()
 
     return _toolchain_setup(
         project_dir,

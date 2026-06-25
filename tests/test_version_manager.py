@@ -169,6 +169,57 @@ def test_needs_bash_script_shell_none_on_posix(tmp_path, monkeypatch):
     assert vm.needs_bash_script_shell(tmp_path) is None
 
 
+def test_git_bash_skips_system32_wsl_stub(tmp_path, monkeypatch):
+    # which('bash') returns the System32 WSL launcher first; _git_bash must skip
+    # it and resolve a real Git Bash (else npm scripts hit WSL_E_DEFAULT_DISTRO).
+    import devready.environment.version_manager as vm
+
+    git_root = tmp_path / "Git"
+    (git_root / "bin").mkdir(parents=True)
+    bash = git_root / "bin" / "bash.exe"
+    bash.write_text("")
+    (git_root / "cmd").mkdir(parents=True)
+    git_exe = git_root / "cmd" / "git.exe"
+    git_exe.write_text("")
+
+    def fake_which(name):
+        if name == "bash":
+            return r"C:\Windows\System32\bash.exe"  # the WSL stub
+        if name == "git":
+            return str(git_exe)
+        return None
+
+    monkeypatch.setattr(vm.shutil, "which", fake_which)
+    assert vm._git_bash() == str(bash)
+
+
+def test_ensure_php_extensions_enables_openssl(tmp_path, monkeypatch):
+    # A fresh PHP with no php.ini must get one created from the template, with the
+    # shipped extensions (openssl) enabled — so `composer install` stops failing
+    # with "the openssl extension is required".
+    import devready.environment.version_manager as vm
+
+    php_dir = tmp_path / "php"
+    (php_dir / "ext").mkdir(parents=True)
+    (php_dir / "ext" / "php_openssl.dll").write_text("")
+    (php_dir / "php.ini-production").write_text(';extension=openssl\n;extension_dir = "ext"\n')
+    php_exe = php_dir / "php.exe"
+    php_exe.write_text("")
+
+    monkeypatch.setattr(vm, "command_exists", lambda n: n == "php")
+    monkeypatch.setattr(
+        vm, "run_command",
+        lambda *a, **k: vm.CommandResult(command="x", returncode=0, stdout=str(php_exe)),
+    )
+
+    vm.ensure_php_extensions()
+
+    ini = (php_dir / "php.ini").read_text()
+    assert "extension=openssl" in ini
+    assert ";extension=openssl" not in ini       # it was uncommented
+    assert 'extension_dir = "ext"' in ini
+
+
 def test_parse_version_major_minor():
     assert _parse_version("3.11") == (3, 11)
 
