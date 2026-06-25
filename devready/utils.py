@@ -147,6 +147,65 @@ def run_command(
         return CommandResult(command=display, returncode=124, stderr="timed out")
 
 
+def run_command_teed(
+    command: "Sequence[str] | str",
+    *,
+    cwd: Optional[str] = None,
+    shell: bool = False,
+    timeout: Optional[int] = None,
+    max_capture_lines: int = 400,
+) -> CommandResult:
+    """Run a command, streaming its output live AND capturing the tail.
+
+    Like :func:`run_command`, but the child's combined stdout+stderr is both
+    shown to the user in real time (important for slow installs like a multi-
+    minute ``pip install torch``) and captured, so a failure can be diagnosed —
+    e.g. handed to the LLM healer. Only the last ``max_capture_lines`` lines are
+    retained, which is more than enough for an error trace while keeping memory
+    bounded on a chatty build.
+
+    Returns a :class:`CommandResult` whose ``stdout`` holds the captured tail.
+    Never raises on a non-zero exit; the caller decides what failure means.
+    """
+    from collections import deque
+
+    display = command if isinstance(command, str) else " ".join(command)
+    if not shell:
+        command = _resolve_windows_executable(command)
+
+    captured: "deque[str]" = deque(maxlen=max_capture_lines)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            shell=shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # merge so the error context stays in order
+            text=True,
+            bufsize=1,  # line-buffered, so live output isn't withheld
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return CommandResult(command=display, returncode=127, stderr="command not found")
+
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            sys.stdout.write(line)
+            captured.append(line)
+        sys.stdout.flush()
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return CommandResult(
+            command=display, returncode=124, stderr="timed out", stdout="".join(captured)
+        )
+
+    return CommandResult(
+        command=display, returncode=process.returncode, stdout="".join(captured)
+    )
+
+
 def command_exists(name: str) -> bool:
     """Return True if an executable is available on the user's PATH.
 

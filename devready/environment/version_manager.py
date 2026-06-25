@@ -38,7 +38,7 @@ from ..utils import CommandResult, command_exists, console, run_command
 # -----------------------------------------------------------------------------
 # Python
 # -----------------------------------------------------------------------------
-def setup_python(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+def setup_python(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Create a virtualenv and install Python dependencies.
 
     Steps:
@@ -117,13 +117,28 @@ def setup_python(project_dir: Path, result: DetectionResult) -> List[CommandResu
     if "requirements.txt" in result.package_files:
         console.print("  Installing from requirements.txt…")
         outcomes.append(
-            _pip_install_with_retry(venv_python, ["-r", "requirements.txt"], project_dir)
+            _pip_install(venv_python, ["-r", "requirements.txt"], project_dir, healer)
         )
     elif "pyproject.toml" in result.package_files or "setup.py" in result.package_files:
         console.print("  Installing project (pip install .)…")
-        outcomes.append(_pip_install_with_retry(venv_python, ["."], project_dir))
+        outcomes.append(_pip_install(venv_python, ["."], project_dir, healer))
 
     return outcomes
+
+
+def _pip_install(
+    venv_python: str, target_args: List[str], project_dir: Path, healer
+) -> CommandResult:
+    """Install Python deps, healing on failure when a healer is provided.
+
+    With a healer, the install goes through the self-healing executor (built-in
+    relaxed-resolution retry + LLM diagnosis). Without one, it uses the original
+    offline relaxed-retry helper, so the no-LLM path is unchanged.
+    """
+    if healer is not None:
+        cmd = [venv_python, "-m", "pip", "install"] + target_args
+        return healer.run_step(cmd, cwd=str(project_dir), description="pip install")
+    return _pip_install_with_retry(venv_python, target_args, project_dir)
 
 
 def _venv_has_pip(venv_python: str) -> bool:
@@ -298,7 +313,7 @@ def _interpreter_version(python_path: str) -> Optional[Tuple[int, int]]:
 # -----------------------------------------------------------------------------
 # Node.js
 # -----------------------------------------------------------------------------
-def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+def setup_node(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Install Node dependencies, ensuring the right Node version when possible.
 
     Mirrors the Python flow's philosophy of per-project versions:
@@ -386,6 +401,14 @@ def setup_node(project_dir: Path, result: DetectionResult) -> List[CommandResult
         install_cmd = npm_prefix + (["npm", "ci"] if has_lockfile else ["npm", "install"])
 
     console.print(f"  Running {' '.join(install_cmd)}…")
+    if healer is not None:
+        # The healer streams + captures, does the --legacy-peer-deps retry, and
+        # (with an LLM key) diagnoses anything else that fails.
+        outcomes.append(
+            healer.run_step(install_cmd, cwd=str(project_dir), description="npm install")
+        )
+        return outcomes
+
     result_cmd = run_command(install_cmd, cwd=str(project_dir), capture=False)
     outcomes.append(result_cmd)
 
@@ -466,6 +489,7 @@ def _toolchain_setup(
     runner: str,
     install_cmd: List[str],
     install_hint: str,
+    healer=None,
 ) -> List[CommandResult]:
     """Shared "install deps with a single command-line tool" setup.
 
@@ -486,10 +510,10 @@ def _toolchain_setup(
             )
             return []
     console.print(f"  Installing {language} dependencies ({' '.join(install_cmd)})…")
-    return [run_command(install_cmd, cwd=str(project_dir), capture=False)]
+    return [_run_install(install_cmd, project_dir, healer, f"{language} dependencies")]
 
 
-def setup_rust(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+def setup_rust(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Fetch and build a Rust project's dependencies with cargo."""
     return _toolchain_setup(
         project_dir,
@@ -497,10 +521,11 @@ def setup_rust(project_dir: Path, result: DetectionResult) -> List[CommandResult
         runner="cargo",
         install_cmd=["cargo", "build"],
         install_hint="https://rustup.rs",
+        healer=healer,
     )
 
 
-def setup_go(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+def setup_go(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Download a Go module's dependencies."""
     return _toolchain_setup(
         project_dir,
@@ -508,10 +533,11 @@ def setup_go(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
         runner="go",
         install_cmd=["go", "mod", "download"],
         install_hint="https://go.dev/dl/",
+        healer=healer,
     )
 
 
-def setup_ruby(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+def setup_ruby(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Install a Ruby project's gems with Bundler.
 
     If Bundler itself is missing but RubyGems is present, install it first.
@@ -532,11 +558,11 @@ def setup_ruby(project_dir: Path, result: DetectionResult) -> List[CommandResult
         console.print("  Bundler not found — installing it (gem install bundler)…")
         outcomes.append(run_command(["gem", "install", "bundler"], cwd=str(project_dir), capture=False))
     console.print("  Installing Ruby dependencies (bundle install)…")
-    outcomes.append(run_command(["bundle", "install"], cwd=str(project_dir), capture=False))
+    outcomes.append(_run_install(["bundle", "install"], project_dir, healer, "Ruby dependencies"))
     return outcomes
 
 
-def setup_php(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+def setup_php(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Install a PHP project's dependencies with Composer."""
     return _toolchain_setup(
         project_dir,
@@ -544,6 +570,7 @@ def setup_php(project_dir: Path, result: DetectionResult) -> List[CommandResult]
         runner="composer",
         install_cmd=["composer", "install"],
         install_hint="https://getcomposer.org",
+        healer=healer,
     )
 
 
@@ -569,7 +596,7 @@ def _runner_available(executable: str) -> bool:
     return command_exists(executable) or Path(executable).exists()
 
 
-def setup_java(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+def setup_java(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Build a Java project's dependencies with Maven or Gradle (wrapper-aware)."""
     from . import system_deps
 
@@ -585,7 +612,7 @@ def setup_java(project_dir: Path, result: DetectionResult) -> List[CommandResult
                 return []
             exe = maven_executable(project_dir)
         console.print("  Building with Maven (install -DskipTests)…")
-        return [run_command([exe, "install", "-DskipTests"], cwd=str(project_dir), capture=False)]
+        return [_run_install([exe, "install", "-DskipTests"], project_dir, healer, "Maven build")]
 
     # Otherwise it's a Gradle project.
     exe = gradle_executable(project_dir)
@@ -599,10 +626,10 @@ def setup_java(project_dir: Path, result: DetectionResult) -> List[CommandResult
             return []
         exe = gradle_executable(project_dir)
     console.print("  Building with Gradle (build -x test)…")
-    return [run_command([exe, "build", "-x", "test"], cwd=str(project_dir), capture=False)]
+    return [_run_install([exe, "build", "-x", "test"], project_dir, healer, "Gradle build")]
 
 
-def setup_dotnet(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
+def setup_dotnet(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
     """Restore a .NET project's dependencies with the dotnet CLI."""
     return _toolchain_setup(
         project_dir,
@@ -610,14 +637,20 @@ def setup_dotnet(project_dir: Path, result: DetectionResult) -> List[CommandResu
         runner="dotnet",
         install_cmd=["dotnet", "restore"],
         install_hint="https://dotnet.microsoft.com/download",
+        healer=healer,
     )
 
 
 # -----------------------------------------------------------------------------
 # Dispatcher
 # -----------------------------------------------------------------------------
-def setup_environment(project_dir: Path, result: DetectionResult) -> List[CommandResult]:
-    """Route to the correct per-language setup function for a detection result."""
+def setup_environment(project_dir: Path, result: DetectionResult, healer=None) -> List[CommandResult]:
+    """Route to the correct per-language setup function for a detection result.
+
+    ``healer`` is an optional :class:`devready.ai.healer.InstallHealer`. When
+    given, dependency-install commands run through it so a failure is retried and
+    (with an LLM key) auto-diagnosed and fixed instead of dead-ending.
+    """
     setups = {
         "Python": setup_python,
         "Node.js": setup_node,
@@ -630,9 +663,23 @@ def setup_environment(project_dir: Path, result: DetectionResult) -> List[Comman
     }
     setup_fn = setups.get(result.language)
     if setup_fn:
-        return setup_fn(project_dir, result)
+        return setup_fn(project_dir, result, healer)
     console.print(f"  [muted]No automated setup for {result.language} yet.[/muted]")
     return []
+
+
+def _run_install(
+    command: List[str], project_dir: Path, healer, description: str
+) -> CommandResult:
+    """Run a dependency-install command, healing on failure when a healer is set.
+
+    Falls back to the plain streamed runner when no healer is provided, so the
+    offline path (and existing tests that monkeypatch ``run_command``) is
+    unchanged.
+    """
+    if healer is not None:
+        return healer.run_step(command, cwd=str(project_dir), description=description)
+    return run_command(command, cwd=str(project_dir), capture=False)
 
 
 def python_executable(project_dir: Path) -> Optional[str]:

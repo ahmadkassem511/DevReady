@@ -66,6 +66,17 @@ class Engine:
         self._install_ok: bool = True  # set False if a dep-install step fails
         self._project_setup_ran: bool = False  # True if the project's own setup ran
 
+    def _make_healer(self, project_dir: Path):
+        """Build a self-healing install executor for a directory.
+
+        The healer streams + captures install output, retries common failures
+        offline, and (when an OpenRouter key is configured) asks the LLM for a
+        safe fix and retries — so an install isn't abandoned at the first error.
+        """
+        from .ai.healer import InstallHealer
+
+        return InstallHealer(self.config, project_dir, assume_yes=self.assume_yes)
+
     def _confirm(self, prompt: str, default_yes: bool = True) -> bool:
         """Ask a yes/no question, or auto-answer when running with --yes.
 
@@ -296,17 +307,21 @@ class Engine:
 
         # 4b. Otherwise fall back to DevReady's language-native setup at the root.
         if self.detections:
+            healer = self._make_healer(self.project_dir)
             for det in self.detections:
                 console.print(f"  Setting up [bold]{det.language}[/bold]…")
-                outcomes = version_manager.setup_environment(self.project_dir, det)
+                outcomes = version_manager.setup_environment(self.project_dir, det, healer)
                 # Report any failed sub-steps so the user knows before we launch.
+                # (The healer already streamed its diagnosis and retried; if it's
+                # still failing here, auto-fixing wasn't possible.)
                 for outcome in outcomes:
                     if not outcome.ok:
                         console.print(
-                            f"  [warning]A setup command exited with code {outcome.returncode}:\n"
+                            f"  [warning]A setup command still failed after auto-fix attempts "
+                            f"(exit {outcome.returncode}):\n"
                             f"  [muted]{outcome.command}[/muted]\n"
-                            f"  Some dependencies may be missing. Run the command above manually "
-                            f"to see the full error.[/warning]"
+                            f"  See the diagnosis above. You can run the command manually for the "
+                            f"full output.[/warning]"
                         )
                 self._install_ok = all(o.ok for o in outcomes) if outcomes else self._install_ok
         else:
@@ -341,9 +356,10 @@ class Engine:
             if not self._confirm(f"    Set up [bold]{rel}[/bold] ({langs})? [Y/n] "):
                 console.print(f"    [muted]Skipped {rel}.[/muted]")
                 continue
+            sub_healer = self._make_healer(subdir)
             for det in results:
                 console.print(f"    Setting up {rel} ([bold]{det.language}[/bold])…")
-                outcomes = version_manager.setup_environment(subdir, det)
+                outcomes = version_manager.setup_environment(subdir, det, sub_healer)
                 # A sub-project failure is reported but doesn't block the root
                 # launch — the main app may still run fine.
                 for outcome in outcomes:
