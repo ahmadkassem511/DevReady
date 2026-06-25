@@ -140,6 +140,35 @@ def test_setup_php_installs_runtime_before_composer(tmp_path, monkeypatch):
     assert "composer" in installed  # and the package manager
 
 
+def test_needs_bash_script_shell_detects_sh_scripts(tmp_path, monkeypatch):
+    import devready.environment.version_manager as vm
+
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"postinstall": "build/demi.sh ci", "dev": "build/demi.sh dev"}}'
+    )
+    monkeypatch.setattr(vm.sys, "platform", "win32")
+    monkeypatch.setattr(vm.shutil, "which", lambda n: r"C:\Git\bash.exe" if n == "bash" else None)
+    assert vm.needs_bash_script_shell(tmp_path) == r"C:\Git\bash.exe"
+
+
+def test_needs_bash_script_shell_none_without_sh(tmp_path, monkeypatch):
+    import devready.environment.version_manager as vm
+
+    (tmp_path / "package.json").write_text('{"scripts": {"dev": "vite", "build": "vite build"}}')
+    monkeypatch.setattr(vm.sys, "platform", "win32")
+    monkeypatch.setattr(vm.shutil, "which", lambda n: r"C:\Git\bash.exe")
+    assert vm.needs_bash_script_shell(tmp_path) is None
+
+
+def test_needs_bash_script_shell_none_on_posix(tmp_path, monkeypatch):
+    # On Unix npm already uses sh, which runs .sh fine — no override needed.
+    import devready.environment.version_manager as vm
+
+    (tmp_path / "package.json").write_text('{"scripts": {"postinstall": "build/x.sh"}}')
+    monkeypatch.setattr(vm.sys, "platform", "linux")
+    assert vm.needs_bash_script_shell(tmp_path) is None
+
+
 def test_parse_version_major_minor():
     assert _parse_version("3.11") == (3, 11)
 

@@ -97,4 +97,19 @@ def test_launch_env_none_when_system_node_is_fine(tmp_path, monkeypatch):
         DetectionResult(language="Node.js", version="20", frameworks=[], package_files=["package.json"])
     ]
     monkeypatch.setattr(engine_mod.version_manager, "_node_satisfies", lambda v: True)
+    monkeypatch.setattr(engine_mod.version_manager, "needs_bash_script_shell", lambda p: None)
     assert eng._launch_env() is None
+
+
+def test_launch_env_uses_bash_for_shell_script_projects(tmp_path, monkeypatch):
+    # A project whose `npm run dev` is a Unix shell script must launch through
+    # bash on Windows, even when the system Node is fine (no pinned-Node env).
+    import devready.engine as engine_mod
+
+    eng = Engine(project_dir=tmp_path)
+    eng.detections = []  # no pinned Node -> env would otherwise be None
+    monkeypatch.setattr(engine_mod.version_manager, "needs_bash_script_shell", lambda p: r"C:\Git\bash.exe")
+
+    env = eng._launch_env()
+    assert env is not None
+    assert env["npm_config_script_shell"] == r"C:\Git\bash.exe"

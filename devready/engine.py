@@ -605,17 +605,27 @@ class Engine:
         persisted so ``devready run`` (which may have no fresh detections) can
         relaunch with the same toolchain.
         """
+        env: Optional[dict] = None
+
         bin_dir = self._pinned_node_bin_dir()
         if not bin_dir:
             # Relaunch path: reuse what `start` persisted, if still valid.
             saved = self._read_state().get("node_bin_dir")
             bin_dir = saved if saved and Path(saved).exists() else None
-        if not bin_dir:
-            return None
-        env = os.environ.copy()
-        env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-        env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
-        self._write_state(node_bin_dir=bin_dir)
+        if bin_dir:
+            env = os.environ.copy()
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
+            self._write_state(node_bin_dir=bin_dir)
+
+        # If this project's npm scripts are shell scripts, launch `npm run …`
+        # through bash too (same reasoning as install) so a Unix dev script runs
+        # on Windows instead of crashing in cmd.exe.
+        bash_shell = version_manager.needs_bash_script_shell(self.project_dir)
+        if bash_shell:
+            env = env or os.environ.copy()
+            env["npm_config_script_shell"] = bash_shell
+
         return env
 
     def _spawn_and_check(self, target: dict, env: Optional[dict] = None) -> Optional[dict]:

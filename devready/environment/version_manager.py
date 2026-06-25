@@ -24,6 +24,7 @@ we proceed with the current runtime and warn, rather than hard-failing.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -382,6 +383,17 @@ def setup_node(project_dir: Path, result: DetectionResult, healer=None) -> List[
                 f"{_node_version()}; proceeding with the current Node.[/warning]"
             )
 
+    # If this project's npm scripts are Unix shell scripts, run them through bash
+    # (Git Bash) instead of cmd.exe — so a `postinstall: build/foo.sh` works
+    # during install AND `npm run dev` works at launch, on Windows. Carried via
+    # the env so no project files are modified.
+    bash_shell = needs_bash_script_shell(project_dir)
+    if bash_shell:
+        if node_env is None:
+            node_env = os.environ.copy()
+        node_env["npm_config_script_shell"] = bash_shell
+        console.print("  This project's scripts are shell scripts — using bash to run them.")
+
     # 2. Install dependencies using the package manager the project actually
     #    uses — detected from its lockfile. A yarn/pnpm project installed with
     #    npm often breaks, so honour yarn.lock / pnpm-lock.yaml.
@@ -468,6 +480,38 @@ def _which_on_path(name: str, path: Optional[str]) -> bool:
     system default.
     """
     return shutil.which(name, path=path) is not None
+
+
+def needs_bash_script_shell(project_dir: Path) -> Optional[str]:
+    """Return a bash path to use as npm's ``script-shell``, or None.
+
+    On Windows, npm runs ``package.json`` scripts through ``cmd.exe`` by default.
+    Repos written for Unix put shell scripts in their lifecycle/run scripts
+    (e.g. ``"postinstall": "build/foo.sh"``), which cmd can't execute —
+    ``'build' is not recognized…``. When such a project is detected *and* a bash
+    is available (Git Bash), pointing npm's ``script-shell`` at bash lets those
+    scripts run for real, for both ``npm install``'s lifecycle scripts and
+    ``npm run`` at launch — rather than skipping them.
+
+    Returns None when not needed: non-Windows (sh already handles ``.sh``), no
+    bash on PATH, or the project has no shell-script npm scripts.
+    """
+    if sys.platform != "win32":
+        return None
+    bash = shutil.which("bash")
+    if not bash:
+        return None
+    pkg = project_dir / "package.json"
+    if not pkg.exists():
+        return None
+    try:
+        scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
+    except (json.JSONDecodeError, OSError):
+        return None
+    # A script that invokes a `.sh` file is a strong, low-false-positive signal
+    # that the repo expects a Unix shell.
+    blob = " ".join(str(v) for v in (scripts or {}).values()).lower()
+    return bash if ".sh" in blob else None
 
 
 def _fnm_node_bin_dir(version: str) -> Optional[str]:
