@@ -47,3 +47,54 @@ def test_requirements_report_includes_system_packages_and_env(tmp_path):
 def test_requirements_report_empty_for_unknown(tmp_path):
     # A directory with no recognised stack yields no requirement rows.
     assert Engine(project_dir=tmp_path).requirements_report() == []
+
+
+def test_detect_port_from_log_prefers_announced_url(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    log = tmp_path / "run.log"
+    log.write_text("VITE ready\n  ->  Local:   http://localhost:5173/\n")
+    # The announced port wins over the guessed fallback.
+    assert eng._detect_port_from_log(log, fallback=3000) == 5173
+
+
+def test_detect_port_from_log_falls_back_when_silent(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    log = tmp_path / "run.log"
+    log.write_text("compiling...\nstill working, no url yet\n")
+    assert eng._detect_port_from_log(log, fallback=8000) == 8000
+
+
+def test_launch_env_uses_pinned_node_bin(tmp_path, monkeypatch):
+    # When a project pins a Node version the system doesn't meet, the launch env
+    # must put that Node's bin dir first on PATH (so `npm run dev` doesn't run on
+    # the wrong Node and crash, as gradio did).
+    import devready.engine as engine_mod
+    from devready.detectors import DetectionResult
+
+    bin_dir = tmp_path / "node24bin"
+    bin_dir.mkdir()
+    eng = Engine(project_dir=tmp_path)
+    eng.detections = [
+        DetectionResult(language="Node.js", version="24.0", frameworks=[], package_files=["package.json"])
+    ]
+
+    monkeypatch.setattr(engine_mod.version_manager, "_node_satisfies", lambda v: False)
+    monkeypatch.setattr(engine_mod.version_manager, "_fnm_node_bin_dir", lambda v: str(bin_dir))
+
+    env = eng._launch_env()
+    assert env is not None
+    assert env["PATH"].startswith(str(bin_dir))
+    # And it persisted the bin dir so `devready run` can relaunch with it.
+    assert eng._read_state().get("node_bin_dir") == str(bin_dir)
+
+
+def test_launch_env_none_when_system_node_is_fine(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    from devready.detectors import DetectionResult
+
+    eng = Engine(project_dir=tmp_path)
+    eng.detections = [
+        DetectionResult(language="Node.js", version="20", frameworks=[], package_files=["package.json"])
+    ]
+    monkeypatch.setattr(engine_mod.version_manager, "_node_satisfies", lambda v: True)
+    assert eng._launch_env() is None

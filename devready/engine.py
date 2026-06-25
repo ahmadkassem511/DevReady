@@ -568,9 +568,14 @@ class Engine:
 
     def _launch_targets(self, targets: List[dict]) -> None:
         """Spawn each target, wait for it, persist state, and hand over URL(s)."""
+        # Launch with the project's pinned Node on PATH (if any), so `npm run dev`
+        # — and the pnpm/yarn its scripts invoke — use the right toolchain rather
+        # than the system one (otherwise a Node-24 project crashes on Node 22).
+        launch_env = self._launch_env()
+
         records: List[dict] = []
         for target in targets:
-            record = self._spawn_and_check(target)
+            record = self._spawn_and_check(target, env=launch_env)
             if record:
                 records.append(record)
 
@@ -581,12 +586,47 @@ class Engine:
         self._write_state(processes=records, docker=self._read_state().get("docker", False))
         self._announce_running(records)
 
-    def _spawn_and_check(self, target: dict) -> Optional[dict]:
-        """Start one component and watch ~3s for an immediate crash.
+    def _pinned_node_bin_dir(self) -> Optional[str]:
+        """Return the fnm-managed Node bin dir if this project pins an unmet version."""
+        node_det = next((d for d in self.detections if d.language == "Node.js"), None)
+        if not node_det or not node_det.version:
+            return None
+        if version_manager._node_satisfies(node_det.version):
+            return None  # the system Node already satisfies the pin
+        return version_manager._fnm_node_bin_dir(node_det.version)
+
+    def _launch_env(self) -> Optional[dict]:
+        """Build the environment to launch in: the pinned Node's bin dir first on PATH.
+
+        Returns None when the system Node is fine. The resolved bin dir is also
+        persisted so ``devready run`` (which may have no fresh detections) can
+        relaunch with the same toolchain.
+        """
+        bin_dir = self._pinned_node_bin_dir()
+        if not bin_dir:
+            # Relaunch path: reuse what `start` persisted, if still valid.
+            saved = self._read_state().get("node_bin_dir")
+            bin_dir = saved if saved and Path(saved).exists() else None
+        if not bin_dir:
+            return None
+        env = os.environ.copy()
+        env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
+        self._write_state(node_bin_dir=bin_dir)
+        return env
+
+    def _spawn_and_check(self, target: dict, env: Optional[dict] = None) -> Optional[dict]:
+        """Start one component, watch for an immediate crash, and verify its port.
 
         Output is streamed to a per-component log file (never a PIPE, which could
-        deadlock a chatty long-running server). Returns a state record on
-        success, or None if it failed/crashed (with the error shown).
+        deadlock a chatty long-running server). ``env`` lets the launch run with a
+        pinned toolchain on PATH. Returns a state record on success, or None if it
+        crashed (with the error shown).
+
+        The record's ``port`` is set only if the server actually accepts a
+        connection — so we never report (or persist) a URL that 404s/refuses. The
+        guessed/announced port is kept in ``announced_port`` for an honest "still
+        starting" message.
         """
         name, cwd, command, port = target["name"], target["cwd"], target["command"], target["port"]
         label = "" if name == "root" else f" [{name}]"
@@ -597,14 +637,18 @@ class Engine:
         log_path = self._state_dir / log_name
         try:
             log_file = open(log_path, "w", encoding="utf-8", errors="replace")
-            # Resolve npm/npx/etc. to a launchable path on Windows (see utils).
-            launch_cmd = _resolve_windows_executable(command)
-            process = subprocess.Popen(launch_cmd, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT)
+            # Resolve npm/npx/etc. to a launchable path on Windows (see utils),
+            # searching the launch env's PATH so the pinned Node's npm is used.
+            launch_cmd = _resolve_windows_executable(command, path=(env or {}).get("PATH"))
+            process = subprocess.Popen(
+                launch_cmd, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT, env=env
+            )
         except (OSError, ValueError) as exc:
             console.print(f"  [error]Failed to launch{label}: {exc}[/error]")
             return None
 
-        for _ in range(6):
+        # Watch ~4s for an immediate crash (e.g. a wrong-version engine error).
+        for _ in range(8):
             time.sleep(0.5)
             if process.poll() is not None:
                 console.print(f"  [error]{name} exited immediately (code {process.returncode}).[/error]")
@@ -612,39 +656,72 @@ class Engine:
                 console.print(f"  [muted]Full log: {log_path}[/muted]")
                 return None
 
-        return {"name": name, "pid": process.pid, "command": command, "port": port, "cwd": cwd}
+        # Prefer the port the server actually announces in its log over our guess.
+        announced = self._detect_port_from_log(log_path, port)
+        reachable_port = announced if announced and self._wait_for_port(announced) else None
+        return {
+            "name": name,
+            "pid": process.pid,
+            "command": command,
+            "port": reachable_port,        # only a port that truly responds
+            "announced_port": announced,   # what we expect it on, for messaging
+            "cwd": cwd,
+        }
+
+    # URLs/ports a dev server prints when it starts (vite, next, CRA, flask…).
+    _LOG_URL_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})")
+    _LOG_PORT_RE = re.compile(r"(?:port|listening on|running at|running on)\D{0,15}?(\d{2,5})", re.IGNORECASE)
+
+    def _detect_port_from_log(self, log_path: Path, fallback: Optional[int]) -> Optional[int]:
+        """Find the port a launched server announced in its log, else the fallback."""
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return fallback
+        match = self._LOG_URL_RE.search(text) or self._LOG_PORT_RE.search(text)
+        if match:
+            value = int(match.group(1))
+            if 1 <= value <= 65535:
+                return value
+        return fallback
 
     def _announce_running(self, records: List[dict]) -> None:
-        """Wait for ports, open the primary URL, and print a summary."""
+        """Open the primary reachable URL and print an honest summary.
+
+        Reachability was already determined in ``_spawn_and_check`` (``port`` is
+        set only when the server truly responds). We never present a clickable URL
+        that isn't actually up — instead we say it's still starting and show its
+        recent output, so the user isn't sent to a dead localhost tab.
+        """
         opened = False
+        console.print()
         for record in records:
-            port = record.get("port")
-            if not port:
-                continue
-            url = f"http://localhost:{port}"
-            console.print(f"  Waiting for {record['name']} on port {port}…")
-            if self._wait_for_port(port):
-                # Open just the first ready URL (usually the UI) to avoid a pile
-                # of browser tabs; the rest are printed below.
+            name = record["name"]
+            port = record.get("port")  # reachable port, or None
+            announced = record.get("announced_port")
+
+            if port:
+                url = f"http://localhost:{port}"
+                console.print(f"  [success]✓ {name} → {url}[/success]")
                 if not opened:
-                    console.print(f"  Opening [link={url}]{url}[/link]")
                     try:
                         webbrowser.open(url)
                         opened = True
                     except webbrowser.Error:
                         pass
+            elif announced:
+                # Process is alive but nothing is listening yet — be honest.
+                console.print(
+                    f"  [warning]• {name} started but isn't serving on port {announced} yet.[/warning]\n"
+                    f"  [muted]It may still be building (some dev servers take a few minutes) or "
+                    f"it serves on a different port. Recent output:[/muted]"
+                )
+                log_name = "last-run.log" if name == "root" else f"last-run-{name}.log"
+                self._print_log_tail(self._state_dir / log_name, lines=12)
             else:
-                console.print(f"  [muted]No response on port {port} yet — it may still be starting.[/muted]")
+                # A CLI / worker with no web URL — alive is success.
+                console.print(f"  [success]✓ {name} is running[/success] (no web URL).")
 
-        # Final hand-off summary.
-        urls = [(r["name"], r.get("port")) for r in records]
-        if len(records) == 1 and not records[0].get("port"):
-            console.print("\n  [success]✓ Your project is running.[/success]")
-        else:
-            console.print("\n  [success]✓ Running:[/success]")
-            for name, port in urls:
-                where = f" → http://localhost:{port}" if port else " (no web URL)"
-                console.print(f"    • [bold]{name}[/bold]{where}")
         console.print("  Stop everything with [bold]devready stop[/bold].")
 
     def _resolve_launch(self) -> Tuple[Optional[List[str]], Optional[int]]:

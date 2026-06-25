@@ -404,6 +404,12 @@ def setup_node(project_dir: Path, result: DetectionResult, healer=None) -> List[
     if pm != "npm":
         if _which_on_path("corepack", search_path):
             pm_runner = ["corepack", pm]
+            # Enable corepack so a *bare* `pnpm`/`yarn` (as a project's own `npm run
+            # dev` script invokes) resolves to the project's pinned version too —
+            # not a stale global one. This is what makes the later launch work, not
+            # just this install. Best-effort; harmless if it no-ops.
+            if node_env is not None:
+                run_command(["corepack", "enable"], env=node_env)
         elif not _which_on_path(pm, search_path):
             console.print(f"  [warning]{pm} isn't available — using npm instead.[/warning]")
             pm = "npm"
