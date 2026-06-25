@@ -205,7 +205,9 @@ class Engine:
                 for p in saved if p.get("command")
             ]
             if targets:
-                self._launch_targets(targets)
+                served = self._launch_targets(targets)
+                if not served:
+                    self._no_server_help()  # explain how to use it (no served URL)
                 return
 
         # No saved launch — detect one on the fly without a full setup.
@@ -215,10 +217,9 @@ class Engine:
         )
         self.detections = detect_stack(self.project_dir)
         targets = self._collect_launch_targets()
-        if not targets:
+        served = self._launch_targets(targets) if targets else []
+        if not served:
             self._no_server_help()
-            return
-        self._launch_targets(targets)
 
     # -- Step 1: Project detection -------------------------------------------
     def _step_detect(self) -> None:
@@ -868,6 +869,11 @@ class Engine:
         project — never setup/install commands (which would imply, misleadingly,
         that setup still needs doing).
         """
+        # On the relaunch path detections may be empty; populate them so the
+        # AI guide (and heuristics) have the project's stack as context.
+        if not self.detections:
+            self.detections = detect_stack(self.project_dir)
+
         targets = self._makefile_run_targets()
         run_commands = self._readme_run_commands()
 
