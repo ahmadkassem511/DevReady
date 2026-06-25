@@ -537,11 +537,13 @@ class Engine:
             return
 
         targets = self._collect_launch_targets()
-        if not targets:
-            self._no_server_help()
-            return
+        served = self._launch_targets(targets) if targets else []
+        if served:
+            return  # a web app is up and the browser was opened — that's the finish
 
-        self._launch_targets(targets)
+        # No reachable web URL: end with a clear, project-specific "how to use it"
+        # guide instead of a bare "nothing to open".
+        self._no_server_help()
 
     def _collect_launch_targets(self) -> List[dict]:
         """Find everything runnable: the root app plus any sub-project servers.
@@ -569,8 +571,12 @@ class Engine:
 
         return targets
 
-    def _launch_targets(self, targets: List[dict]) -> None:
-        """Spawn each target, wait for it, persist state, and hand over URL(s)."""
+    def _launch_targets(self, targets: List[dict]) -> List[str]:
+        """Spawn each target, wait for it, persist state, hand over URL(s).
+
+        Returns the list of reachable web URLs (empty if nothing is serving), so
+        the caller can decide whether to instead show a "how to use it" guide.
+        """
         # Launch with the project's pinned Node on PATH (if any), so `npm run dev`
         # — and the pnpm/yarn its scripts invoke — use the right toolchain rather
         # than the system one (otherwise a Node-24 project crashes on Node 22).
@@ -583,11 +589,11 @@ class Engine:
                 records.append(record)
 
         if not records:
-            return  # crash details already shown
+            return []  # crash details already shown
 
         # Persist all running processes (preserve any docker flag already set).
         self._write_state(processes=records, docker=self._read_state().get("docker", False))
-        self._announce_running(records)
+        return self._announce_running(records)
 
     def _pinned_node_bin_dir(self) -> Optional[str]:
         """Return the fnm-managed Node bin dir if this project pins an unmet version."""
@@ -698,15 +704,17 @@ class Engine:
                 return value
         return fallback
 
-    def _announce_running(self, records: List[dict]) -> None:
+    def _announce_running(self, records: List[dict]) -> List[str]:
         """Open the primary reachable URL and print an honest summary.
 
         Reachability was already determined in ``_spawn_and_check`` (``port`` is
         set only when the server truly responds). We never present a clickable URL
         that isn't actually up — instead we say it's still starting and show its
-        recent output, so the user isn't sent to a dead localhost tab.
+        recent output, so the user isn't sent to a dead localhost tab. Returns the
+        list of reachable URLs that were announced.
         """
         opened = False
+        served: List[str] = []
         console.print()
         for record in records:
             name = record["name"]
@@ -715,6 +723,7 @@ class Engine:
 
             if port:
                 url = f"http://localhost:{port}"
+                served.append(url)
                 console.print(f"  [success]✓ {name} → {url}[/success]")
                 if not opened:
                     try:
@@ -735,7 +744,9 @@ class Engine:
                 # A CLI / worker with no web URL — alive is success.
                 console.print(f"  [success]✓ {name} is running[/success] (no web URL).")
 
-        console.print("  Stop everything with [bold]devready stop[/bold].")
+        if served:
+            console.print("  Stop everything with [bold]devready stop[/bold].")
+        return served
 
     def _resolve_launch(self) -> Tuple[Optional[List[str]], Optional[int]]:
         """Return ``(command, port)`` for starting the project, or ``(None, None)``.
@@ -875,6 +886,13 @@ class Engine:
                 console.print(f"    [bold]{cmd}[/bold]")
             return
 
+        # Primary path: a project-specific guide written by the LLM from the
+        # README. This is the "tell the user how this project works and how to
+        # run/use it" finish. Falls through to the offline heuristics below when
+        # there's no LLM key or it couldn't be reached.
+        if self._print_project_guide():
+            return
+
         if self._install_ok:
             # Setup succeeded — say so plainly so "no URL" doesn't read as failure.
             console.print(
@@ -897,6 +915,55 @@ class Engine:
                 console.print(f"    [muted]{cmd}[/muted]")
         else:
             console.print("  [muted]See the project's README for how to run it.[/muted]")
+
+    def _print_project_guide(self, served_urls: Optional[List[str]] = None) -> bool:
+        """Print an LLM-written, project-specific "how to use this" guide.
+
+        Reads the README and the detected stack and explains, in plain language,
+        what the project is and the concrete steps to run or use it. Returns True
+        if a guide was shown, False otherwise (no LLM key, or no useful answer) so
+        the caller can fall back to offline heuristics.
+        """
+        from .ai.guide import generate_project_guide
+
+        readme = self._find_readme()
+        readme_text = ""
+        if readme is not None:
+            try:
+                readme_text = readme.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                readme_text = ""
+
+        console.print("  [muted]Preparing a quick guide for this project…[/muted]")
+        guide = generate_project_guide(
+            self.config,
+            self.project_dir,
+            self.detections,
+            self.insights,
+            served_urls=served_urls or [],
+            readme_text=readme_text,
+        )
+        if not guide:
+            return False
+
+        print_banner("[bold cyan]How to use this project[/bold cyan] 📖")
+        what = guide.get("what_it_is", "")
+        if what:
+            console.print(f"  {what}\n")
+        steps = guide.get("steps") or []
+        if steps:
+            console.print("  [bold]Steps to run / use it:[/bold]")
+            for i, step in enumerate(steps, 1):
+                console.print(f"    [bold]{i}.[/bold] {step}")
+        tips = guide.get("tips", "")
+        if tips:
+            console.print(f"\n  [muted]Note: {tips}[/muted]")
+        if not guide.get("has_web_ui"):
+            console.print(
+                "\n  [muted]This project doesn't open as a website — follow the steps above "
+                "to use it.[/muted]"
+            )
+        return True
 
     # Command fragments that indicate "install this tool via a package manager"
     # rather than "run this cloned project" — used to recognise repos that aren't
