@@ -18,8 +18,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -196,6 +198,14 @@ TOOL_PACKAGES = {
         "choco": "gradle", "scoop": "gradle", "winget": "Gradle.Gradle",
         "brew": "gradle", "apt": "gradle", "apt-get": "gradle", "dnf": "gradle",
         "yum": "gradle", "pacman": "gradle",
+    },
+    # Docker — auto-installed when a project needs it to run (compose file, or the
+    # README/guide says so). On Windows/macOS this is Docker Desktop (needs admin
+    # + a running app); on Linux it's the engine packages. See ensure_docker().
+    "docker": {
+        "choco": "docker-desktop", "winget": "Docker.DockerDesktop",
+        "brew": "docker", "apt": "docker.io", "apt-get": "docker.io",
+        "dnf": "docker", "yum": "docker", "pacman": "docker",
     },
 }
 
@@ -490,6 +500,74 @@ def ensure_node() -> bool:
     console.print(
         "  [error]Couldn't make npm available automatically. Install Node.js from "
         "https://nodejs.org and re-run.[/error]"
+    )
+    return False
+
+
+def docker_ready() -> bool:
+    """True if docker is installed AND its daemon is responding."""
+    if not command_exists("docker"):
+        return False
+    return run_command(["docker", "info"]).ok
+
+
+def _start_docker_daemon() -> None:
+    """Best-effort start of the Docker daemon / Docker Desktop, per OS."""
+    if os.name == "nt":
+        candidates = [
+            r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+            os.path.expanduser(r"~\AppData\Local\Docker\Docker Desktop.exe"),
+        ]
+        for exe in candidates:
+            if Path(exe).exists():
+                try:
+                    subprocess.Popen([exe])  # launch the app (starts the engine)
+                except OSError:
+                    pass
+                return
+    elif sys.platform == "darwin":
+        run_command(["open", "-a", "Docker"])
+    else:
+        # Linux: try the service manager (needs privileges; harmless if denied).
+        run_command(["sudo", "systemctl", "start", "docker"])
+
+
+def ensure_docker(wait_seconds: int = 90) -> bool:
+    """Ensure Docker is installed *and* its daemon is running. Returns usability.
+
+    Treats Docker like any other dependency: if it isn't installed, install it
+    (Docker Desktop on Windows/macOS — may need admin); if it's installed but the
+    daemon is down, start it and wait up to ``wait_seconds`` for it to come up.
+    A first-run Docker Desktop can take a while, so the wait is generous.
+    """
+    if docker_ready():
+        return True
+
+    if not command_exists("docker"):
+        console.print("  This project needs [bold]Docker[/bold] — installing it…")
+        install_tool("docker")
+        refresh_path()
+
+    if not command_exists("docker"):
+        console.print(
+            "  [warning]Docker isn't installed yet. Install Docker Desktop "
+            "(https://www.docker.com/products/docker-desktop) and re-run.[/warning]"
+        )
+        return False
+
+    # Installed but the daemon may be stopped — start it and wait.
+    console.print("  Starting the Docker engine (this can take a minute on first run)…")
+    _start_docker_daemon()
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if docker_ready():
+            console.print("  [success]Docker is ready.[/success]")
+            return True
+        time.sleep(3)
+
+    console.print(
+        "  [warning]Docker is installed but its engine didn't start in time. "
+        "Start Docker Desktop, then re-run.[/warning]"
     )
     return False
 

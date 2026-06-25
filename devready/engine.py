@@ -301,6 +301,11 @@ class Engine:
         # reinstall of something the user already has.
         system_deps.refresh_path()
 
+        # Many repos vendor dependencies as git submodules; a shallow clone won't
+        # have them, and the project's own build (e.g. `make dev`) fails without
+        # them. Initialise them up front when the repo declares any.
+        self._init_submodules()
+
         # 4a. Prefer the project's OWN setup method if it ships one (make setup,
         #     setup.sh, task setup, just setup). It's the authoritative way to
         #     set the project up — we just ask before running repo-provided code.
@@ -335,6 +340,21 @@ class Engine:
         # 4c. Monorepos: set up sub-projects found one level down (e.g. a
         #     frontend/ Node app next to a Python backend).
         self._setup_subprojects()
+
+    def _init_submodules(self) -> None:
+        """Fetch git submodules when the repo declares them (``.gitmodules``).
+
+        DevReady clones shallowly, so submodules aren't present; many projects'
+        own build/run commands depend on them. Best-effort and quiet when absent.
+        """
+        if not (self.project_dir / ".gitmodules").exists():
+            return
+        console.print("  Fetching git submodules (this repo uses them)…")
+        run_command(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            cwd=str(self.project_dir),
+            capture=False,
+        )
 
     # Directories we never descend into when scanning a monorepo for sub-projects.
     _IGNORE_DIRS = {
@@ -455,20 +475,11 @@ class Engine:
         if compose is None:
             console.print("  [muted]No docker-compose file — skipping.[/muted]")
             return
-        if not command_exists("docker"):
-            console.print("  [warning]docker-compose found but Docker isn't installed.[/warning]")
-            return
 
-        # `docker` on PATH doesn't mean the daemon is running. `docker info`
-        # talks to the daemon and fails fast if it's not started yet.
-        daemon_check = run_command(["docker", "info"])
-        if not daemon_check.ok:
-            console.print(
-                "  [warning]Docker is installed but the daemon isn't running.\n"
-                "  Start Docker Desktop (or run 'sudo systemctl start docker' on Linux),\n"
-                "  then re-run [bold]devready start[/bold] to bring up services.[/warning]"
-            )
-            return
+        # This project ships a compose file, so Docker is a real dependency.
+        # Treat it like any other: install it and start the engine if needed.
+        if not system_deps.ensure_docker():
+            return  # ensure_docker already explained what's needed
 
         if self._confirm(f"  Start services from {compose.name}? [Y/n] "):
             console.print("  Starting services (docker compose up -d)…")
@@ -538,6 +549,17 @@ class Engine:
             )
             return
 
+        # Primary (mandatory when an LLM is configured): run the project the way
+        # its README/guide documents. DevReady's framework heuristic is only the
+        # fallback — the docs know the real entry point (e.g. `make dev`, not the
+        # `npm run dev` that merely builds assets).
+        guide = self._project_guide() if self.config.llm.is_configured else None
+        if guide and self._has_runnable_web_command(guide):
+            served = self._try_guided_launch(guide)
+            if not served:
+                self._render_guide(guide)  # documented command didn't serve — explain
+            return
+
         targets = self._collect_launch_targets()
         served = self._launch_targets(targets) if targets else []
         if served:
@@ -545,7 +567,10 @@ class Engine:
 
         # No reachable web URL: end with a clear, project-specific "how to use it"
         # guide instead of a bare "nothing to open".
-        self._no_server_help()
+        if guide:
+            self._render_guide(guide)
+        else:
+            self._no_server_help()
 
     def _collect_launch_targets(self) -> List[dict]:
         """Find everything runnable: the root app plus any sub-project servers.
@@ -955,6 +980,26 @@ class Engine:
             readme_text=readme_text,
         )
 
+    def _has_runnable_web_command(self, guide: dict) -> bool:
+        """True if the guide gives a safe, documented command to start a web app."""
+        from .ai.guide import is_safe_launch_command
+
+        cmd = (guide.get("launch_command") or "").strip()
+        return bool(guide.get("has_web_ui") and cmd and is_safe_launch_command(cmd))
+
+    def _guide_needs_docker(self, guide: dict, cmd_str: str) -> bool:
+        """Decide whether running this project requires Docker.
+
+        From the documented command/steps/tips mentioning docker, or a compose
+        file in the repo. DevReady then installs+starts Docker like any other dep.
+        """
+        blob = " ".join(
+            [cmd_str, guide.get("tips", ""), " ".join(guide.get("steps") or [])]
+        ).lower()
+        if "docker" in blob:
+            return True
+        return self._find_compose_file() is not None
+
     def _try_guided_launch(self, guide: dict) -> List[str]:
         """If the guide names the documented web run-command, actually run it.
 
@@ -973,12 +1018,21 @@ class Engine:
         if cmd_str in self._attempted_commands:
             return []  # don't re-run the same command the heuristic already tried
 
+        from .environment import system_deps
+
+        # If running this needs Docker, make it available first (install + start),
+        # treating Docker as a normal dependency.
+        if self._guide_needs_docker(guide, cmd_str):
+            if not system_deps.ensure_docker():
+                console.print(
+                    "  [warning]This project needs Docker to run — see the steps below.[/warning]"
+                )
+                return []
+
         # Make sure the runner exists. make/just/task are cheap to auto-install;
         # others (docker, etc.) we leave — the launch will report honestly if absent.
         head = cmd_str.split()[0].lower()
         if not command_exists(head) and head in ("make", "just", "task"):
-            from .environment import system_deps
-
             console.print(f"  Installing [bold]{head}[/bold] (needed to run this project)…")
             system_deps.install_tool(head)
 

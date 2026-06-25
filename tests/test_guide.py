@@ -62,6 +62,8 @@ def test_project_guide_returns_dict(tmp_path, monkeypatch):
 def test_try_guided_launch_runs_documented_web_command(tmp_path, monkeypatch):
     # A web app whose documented command differs from what was already tried must
     # be launched, and the served URL handed back.
+    import devready.engine as engine_mod
+
     eng = Engine(project_dir=tmp_path, config=_configured())
     captured = {}
 
@@ -71,6 +73,9 @@ def test_try_guided_launch_runs_documented_web_command(tmp_path, monkeypatch):
         return ["http://localhost:8080"]
 
     monkeypatch.setattr(eng, "_launch_targets", fake_launch)
+    # `make` is treated as present so the test doesn't try a real install.
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
+
     served = eng._try_guided_launch(
         {"has_web_ui": True, "launch_command": "make dev", "url": "http://localhost:8080"}
     )
@@ -97,6 +102,31 @@ def test_try_guided_launch_skips_unsafe_and_non_web(tmp_path, monkeypatch):
     assert eng._try_guided_launch(
         {"has_web_ui": True, "launch_command": "rm -rf /", "url": "http://localhost:8080"}
     ) == []
+
+
+def test_guide_needs_docker_detection(tmp_path):
+    eng = Engine(project_dir=tmp_path, config=_configured())
+    # From the tips/steps mentioning docker…
+    assert eng._guide_needs_docker({"tips": "Docker must be running", "steps": []}, "make dev") is True
+    # …or the command itself…
+    assert eng._guide_needs_docker({"tips": "", "steps": []}, "docker compose up") is True
+    # …otherwise not (no compose file in tmp_path).
+    assert eng._guide_needs_docker({"tips": "", "steps": []}, "npm start") is False
+
+
+def test_init_submodules_runs_only_with_gitmodules(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+
+    eng = Engine(project_dir=tmp_path)
+    ran = []
+    monkeypatch.setattr(engine_mod, "run_command", lambda cmd, **k: ran.append(cmd))
+
+    eng._init_submodules()  # no .gitmodules -> no-op
+    assert ran == []
+
+    (tmp_path / ".gitmodules").write_text("[submodule]\n")
+    eng._init_submodules()
+    assert any("submodule" in " ".join(c) for c in ran)
 
 
 def test_is_safe_launch_command():

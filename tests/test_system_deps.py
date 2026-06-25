@@ -244,3 +244,38 @@ def test_fnm_direct_download_skipped_on_non_windows(monkeypatch):
 
     monkeypatch.setattr(sd.os, "name", "posix")
     assert sd._install_fnm_direct_windows() is False
+
+
+def test_docker_in_tool_packages():
+    from devready.environment.system_deps import TOOL_PACKAGES
+
+    assert TOOL_PACKAGES["docker"]["winget"] == "Docker.DockerDesktop"
+    assert TOOL_PACKAGES["docker"]["choco"] == "docker-desktop"
+    assert TOOL_PACKAGES["docker"]["apt"] == "docker.io"
+
+
+def test_ensure_docker_true_when_daemon_already_running(monkeypatch):
+    # If docker is installed and `docker info` succeeds, ensure_docker is a no-op.
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd, "command_exists", lambda n: n == "docker")
+    monkeypatch.setattr(
+        sd, "run_command", lambda *a, **k: sd.CommandResult(command="docker info", returncode=0)
+    )
+    installed = []
+    monkeypatch.setattr(sd, "install_tool", lambda name: installed.append(name) or True)
+    assert sd.ensure_docker() is True
+    assert installed == []  # nothing installed; it was already ready
+
+
+def test_ensure_docker_installs_when_missing(monkeypatch):
+    # docker missing -> install attempted; if still missing afterwards, returns False.
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd, "command_exists", lambda n: False)
+    monkeypatch.setattr(sd, "run_command", lambda *a, **k: sd.CommandResult(command="x", returncode=1))
+    installed = []
+    monkeypatch.setattr(sd, "install_tool", lambda name: installed.append(name) or False)
+    monkeypatch.setattr(sd, "refresh_path", lambda: None)
+    assert sd.ensure_docker() is False
+    assert installed == ["docker"]
