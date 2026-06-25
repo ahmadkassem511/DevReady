@@ -65,6 +65,7 @@ class Engine:
         self.insights: ReadmeInsights = ReadmeInsights()
         self._install_ok: bool = True  # set False if a dep-install step fails
         self._project_setup_ran: bool = False  # True if the project's own setup ran
+        self._attempted_commands: set = set()  # launch commands already tried this run
 
     def _make_healer(self, project_dir: Path):
         """Build a self-healing install executor for a directory.
@@ -585,6 +586,7 @@ class Engine:
 
         records: List[dict] = []
         for target in targets:
+            self._attempted_commands.add(" ".join(target["command"]))
             record = self._spawn_and_check(target, env=launch_env)
             if record:
                 records.append(record)
@@ -893,10 +895,14 @@ class Engine:
             return
 
         # Primary path: a project-specific guide written by the LLM from the
-        # README. This is the "tell the user how this project works and how to
-        # run/use it" finish. Falls through to the offline heuristics below when
-        # there's no LLM key or it couldn't be reached.
-        if self._print_project_guide():
+        # README. If it identifies the documented web run-command, actually run
+        # it (and open the browser); otherwise show the "how to use it" steps.
+        # Falls through to the offline heuristics below when there's no LLM key.
+        guide = self._project_guide()
+        if guide:
+            if self._try_guided_launch(guide):
+                return  # the documented command served a URL — browser opened
+            self._render_guide(guide)
             return
 
         if self._install_ok:
@@ -922,13 +928,12 @@ class Engine:
         else:
             console.print("  [muted]See the project's README for how to run it.[/muted]")
 
-    def _print_project_guide(self, served_urls: Optional[List[str]] = None) -> bool:
-        """Print an LLM-written, project-specific "how to use this" guide.
+    def _project_guide(self) -> Optional[dict]:
+        """Generate (once) the LLM "how to use this" guide dict, or None.
 
-        Reads the README and the detected stack and explains, in plain language,
-        what the project is and the concrete steps to run or use it. Returns True
-        if a guide was shown, False otherwise (no LLM key, or no useful answer) so
-        the caller can fall back to offline heuristics.
+        Returns the structured guide ({what_it_is, has_web_ui, launch_command,
+        url, steps, tips}) so callers can both *act* on it (run the documented
+        command) and render it. None when there's no LLM key or no useful answer.
         """
         from .ai.guide import generate_project_guide
 
@@ -940,18 +945,57 @@ class Engine:
             except OSError:
                 readme_text = ""
 
-        console.print("  [muted]Preparing a quick guide for this project…[/muted]")
-        guide = generate_project_guide(
+        console.print("  [muted]Reading the project to work out how to run it…[/muted]")
+        return generate_project_guide(
             self.config,
             self.project_dir,
             self.detections,
             self.insights,
-            served_urls=served_urls or [],
+            served_urls=[],
             readme_text=readme_text,
         )
-        if not guide:
-            return False
 
+    def _try_guided_launch(self, guide: dict) -> List[str]:
+        """If the guide names the documented web run-command, actually run it.
+
+        DevReady's heuristic sometimes picks the wrong script (e.g. ``npm run dev``
+        when the project's real entry is ``make dev``). When the README-derived
+        guide says it's a web app and gives a safe single run-command we haven't
+        already tried, run THAT and open the browser. Returns the served URLs.
+        """
+        from .ai.guide import is_safe_launch_command, port_from_url
+
+        if not guide.get("has_web_ui"):
+            return []
+        cmd_str = (guide.get("launch_command") or "").strip()
+        if not cmd_str or not is_safe_launch_command(cmd_str):
+            return []
+        if cmd_str in self._attempted_commands:
+            return []  # don't re-run the same command the heuristic already tried
+
+        # Make sure the runner exists. make/just/task are cheap to auto-install;
+        # others (docker, etc.) we leave — the launch will report honestly if absent.
+        head = cmd_str.split()[0].lower()
+        if not command_exists(head) and head in ("make", "just", "task"):
+            from .environment import system_deps
+
+            console.print(f"  Installing [bold]{head}[/bold] (needed to run this project)…")
+            system_deps.install_tool(head)
+
+        port = port_from_url(guide.get("url", ""))
+        console.print(
+            f"\n  The project's documented way to run is [bold]{cmd_str}[/bold] — starting it for you…"
+        )
+        target = {
+            "name": "root",
+            "cwd": str(self.project_dir),
+            "command": cmd_str.split(),
+            "port": port,
+        }
+        return self._launch_targets([target])
+
+    def _render_guide(self, guide: dict) -> None:
+        """Print the project guide dict produced by :meth:`_project_guide`."""
         print_banner("[bold cyan]How to use this project[/bold cyan] 📖")
         what = guide.get("what_it_is", "")
         if what:
@@ -969,7 +1013,6 @@ class Engine:
                 "\n  [muted]This project doesn't open as a website — follow the steps above "
                 "to use it.[/muted]"
             )
-        return True
 
     # Command fragments that indicate "install this tool via a package manager"
     # rather than "run this cloned project" — used to recognise repos that aren't
