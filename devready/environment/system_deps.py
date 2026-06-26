@@ -511,34 +511,66 @@ def docker_ready() -> bool:
     return run_command(["docker", "info"]).ok
 
 
-def _start_docker_daemon() -> None:
-    """Best-effort start of the Docker daemon / Docker Desktop, per OS."""
+def _docker_desktop_exe() -> Optional[str]:
+    """Locate ``Docker Desktop.exe`` on Windows, including non-standard installs.
+
+    Docker Desktop now installs per-user under ``%LOCALAPPDATA%\\Programs\\
+    DockerDesktop`` (the docker CLI lives at ``…\\DockerDesktop\\resources\\bin\\
+    docker.exe``), not just the old ``C:\\Program Files\\Docker\\Docker``. We
+    derive the app from the CLI's own location and also check the standard dirs.
+    """
+    local = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
+    program_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
+
+    # Canonical install locations first (the real top-level launcher).
+    candidates: List[Path] = [
+        Path(local) / "Programs" / "DockerDesktop" / "Docker Desktop.exe",
+        Path(program_files) / "Docker" / "Docker" / "Docker Desktop.exe",
+        Path(local) / "Docker" / "Docker Desktop.exe",
+    ]
+    # Then derive from the CLI location, preferring the DockerDesktop *root*
+    # (…/DockerDesktop/Docker Desktop.exe) over the resources/bin subdirs.
+    cli = shutil.which("docker")
+    if cli:
+        parents = list(Path(cli).resolve().parents)
+        for idx in (2, 3, 1, 0):  # …/DockerDesktop is parents[2] of …/resources/bin/docker.exe
+            if idx < len(parents):
+                candidates.append(parents[idx] / "Docker Desktop.exe")
+
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
+def _start_docker_daemon() -> bool:
+    """Best-effort start of the Docker engine, per OS. True if we launched it."""
     if os.name == "nt":
-        candidates = [
-            r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
-            os.path.expanduser(r"~\AppData\Local\Docker\Docker Desktop.exe"),
-        ]
-        for exe in candidates:
-            if Path(exe).exists():
-                try:
-                    subprocess.Popen([exe])  # launch the app (starts the engine)
-                except OSError:
-                    pass
-                return
-    elif sys.platform == "darwin":
-        run_command(["open", "-a", "Docker"])
-    else:
-        # Linux: try the service manager (needs privileges; harmless if denied).
-        run_command(["sudo", "systemctl", "start", "docker"])
+        exe = _docker_desktop_exe()
+        if exe:
+            try:
+                subprocess.Popen([exe])  # launch the app (which starts the engine)
+                return True
+            except OSError:
+                return False
+        return False
+    if sys.platform == "darwin":
+        return run_command(["open", "-a", "Docker"]).ok
+    # Linux: try the service manager (needs privileges; harmless if denied).
+    return run_command(["sudo", "systemctl", "start", "docker"]).ok
 
 
-def ensure_docker(wait_seconds: int = 90) -> bool:
-    """Ensure Docker is installed *and* its daemon is running. Returns usability.
+def ensure_docker(wait_seconds: int = 180) -> bool:
+    """Ensure Docker is installed *and* its engine is running. Returns usability.
 
     Treats Docker like any other dependency: if it isn't installed, install it
     (Docker Desktop on Windows/macOS — may need admin); if it's installed but the
-    daemon is down, start it and wait up to ``wait_seconds`` for it to come up.
-    A first-run Docker Desktop can take a while, so the wait is generous.
+    engine is down, start it and wait up to ``wait_seconds`` for it to come up.
+    A first-run Docker Desktop can take a few minutes, so the wait is generous and
+    reports progress.
     """
     if docker_ready():
         return True
@@ -555,19 +587,34 @@ def ensure_docker(wait_seconds: int = 90) -> bool:
         )
         return False
 
-    # Installed but the daemon may be stopped — start it and wait.
-    console.print("  Starting the Docker engine (this can take a minute on first run)…")
-    _start_docker_daemon()
+    # Installed but the engine may be stopped — start it and wait (with progress).
+    started = _start_docker_daemon()
+    if started:
+        console.print(
+            "  Starting Docker Desktop — the engine can take a few minutes to come up "
+            "on first start. Waiting…"
+        )
+    else:
+        console.print(
+            "  [warning]Couldn't find Docker Desktop to start it automatically — "
+            "please open Docker Desktop. Waiting for its engine…[/warning]"
+        )
+
     deadline = time.time() + wait_seconds
+    next_notice = time.time() + 30
     while time.time() < deadline:
         if docker_ready():
-            console.print("  [success]Docker is ready.[/success]")
+            console.print("  [success]Docker engine is ready.[/success]")
             return True
+        if time.time() >= next_notice:
+            remaining = max(0, int(deadline - time.time()))
+            console.print(f"  [muted]…still waiting for the Docker engine (up to ~{remaining}s more)…[/muted]")
+            next_notice = time.time() + 30
         time.sleep(3)
 
     console.print(
-        "  [warning]Docker is installed but its engine didn't start in time. "
-        "Start Docker Desktop, then re-run.[/warning]"
+        "  [warning]Docker's engine didn't become ready in time. Once Docker Desktop "
+        "shows 'running', re-run and it'll launch.[/warning]"
     )
     return False
 

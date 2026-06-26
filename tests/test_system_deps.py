@@ -268,6 +268,25 @@ def test_ensure_docker_true_when_daemon_already_running(monkeypatch):
     assert installed == []  # nothing installed; it was already ready
 
 
+def test_docker_desktop_exe_derives_from_cli(tmp_path, monkeypatch):
+    # Docker Desktop installs per-user at …/Programs/DockerDesktop with the CLI at
+    # …/DockerDesktop/resources/bin/docker.exe. We must find the root launcher.
+    import devready.environment.system_deps as sd
+
+    root = tmp_path / "Programs" / "DockerDesktop"
+    (root / "resources" / "bin").mkdir(parents=True)
+    cli = root / "resources" / "bin" / "docker.exe"
+    cli.write_text("")
+    app = root / "Docker Desktop.exe"
+    app.write_text("")
+
+    monkeypatch.setattr(sd.shutil, "which", lambda n: str(cli) if n == "docker" else None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nope"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "nope2"))
+
+    assert sd._docker_desktop_exe() == str(app)
+
+
 def test_ensure_docker_installs_when_missing(monkeypatch):
     # docker missing -> install attempted; if still missing afterwards, returns False.
     import devready.environment.system_deps as sd
