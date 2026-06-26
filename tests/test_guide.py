@@ -170,12 +170,36 @@ def test_try_guided_launch_skips_unsafe_and_non_web(tmp_path, monkeypatch):
 
 def test_guide_needs_docker_detection(tmp_path):
     eng = Engine(project_dir=tmp_path, config=_configured())
-    # From the tips/steps mentioning docker…
-    assert eng._guide_needs_docker({"tips": "Docker must be running", "steps": []}, "make dev") is True
-    # …or the command itself…
+    # The command itself uses docker -> yes.
     assert eng._guide_needs_docker({"tips": "", "steps": []}, "docker compose up") is True
-    # …otherwise not (no compose file in tmp_path).
-    assert eng._guide_needs_docker({"tips": "", "steps": []}, "npm start") is False
+    # A generic wrapper (make) + a docker mention -> yes.
+    assert eng._guide_needs_docker({"tips": "Docker must be running", "steps": []}, "make dev") is True
+    # A direct app runner -> NO, even if a compose file exists (run it anyway).
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n")
+    assert eng._guide_needs_docker({"tips": "uses docker for prod", "steps": []}, "npm run dev") is False
+
+
+def test_npm_dev_launches_without_container_engine(tmp_path, monkeypatch):
+    # A repo with a compose file but a documented `npm run dev` must still launch
+    # via npm — DevReady must NOT block on a container engine it doesn't need.
+    import devready.engine as engine_mod
+    from devready.environment import system_deps as sd
+
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n")
+    eng = Engine(project_dir=tmp_path, config=_configured())
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
+    # If this is called, the test fails — npm run dev must not need an engine.
+    monkeypatch.setattr(
+        sd, "ensure_container_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("should not need a container engine")),
+    )
+    monkeypatch.setattr(eng, "_launch_targets", lambda *a, **k: ["http://localhost:3000"])
+
+    served = eng._try_guided_launch(
+        {"has_web_ui": True, "launch_command": "npm run dev", "url": "http://localhost:3000",
+         "tips": "docker optional", "steps": []}
+    )
+    assert served == ["http://localhost:3000"]
 
 
 def test_init_submodules_runs_only_with_gitmodules(tmp_path, monkeypatch):

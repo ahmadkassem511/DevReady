@@ -67,6 +67,20 @@ class Engine:
         self._project_setup_ran: bool = False  # True if the project's own setup ran
         self._attempted_commands: set = set()  # launch commands already tried this run
         self._extra_path: Optional[str] = None  # dir to prepend on launch (e.g. podman docker-shim)
+        self._container_runtime = None  # cached (name, path_prefix) once checked this run
+
+    def _ensure_runtime(self):
+        """Ensure a container engine once per run (cached) and apply its PATH prefix.
+
+        Setting up an engine (esp. provisioning Podman's VM) is slow and can fail
+        — we must not repeat it in both the services step and the launch step.
+        """
+        if self._container_runtime is None:
+            self._container_runtime = system_deps.ensure_container_runtime()
+            _, path_prefix = self._container_runtime
+            if path_prefix:
+                self._extra_path = path_prefix
+        return self._container_runtime
 
     def _make_healer(self, project_dir: Path):
         """Build a self-healing install executor for a directory.
@@ -497,12 +511,10 @@ class Engine:
             return
 
         # A container engine is now a real dependency — ensure one (Docker if
-        # present, else Podman, no admin).
-        runtime, path_prefix = system_deps.ensure_container_runtime()
+        # present, else Podman, no admin). Cached so the launch step won't retry.
+        runtime, _ = self._ensure_runtime()
         if not runtime:
             return  # ensure_container_runtime already explained what's needed
-        if path_prefix:
-            self._extra_path = path_prefix
         svc_env = self._launch_env()  # carries the engine's PATH (e.g. podman shim)
 
         if compose is not None:
@@ -1139,18 +1151,29 @@ class Engine:
         cmd = (guide.get("launch_command") or "").strip()
         return bool(guide.get("has_web_ui") and cmd and is_safe_launch_command(cmd))
 
-    def _guide_needs_docker(self, guide: dict, cmd_str: str) -> bool:
-        """Decide whether running this project requires Docker.
+    # Generic task runners that often shell out to docker internally.
+    _DOCKER_WRAPPER_RUNNERS = ("make", "just", "task", "mvnw", "gradlew", "rake")
 
-        From the documented command/steps/tips mentioning docker, or a compose
-        file in the repo. DevReady then installs+starts Docker like any other dep.
+    def _guide_needs_docker(self, guide: dict, cmd_str: str) -> bool:
+        """Decide whether the documented RUN command needs a container engine.
+
+        Deliberately narrow so DevReady still launches apps that run fine without
+        Docker (e.g. ``npm run dev`` → localhost:3000) even when the repo also
+        ships a compose file:
+          * the run command itself uses docker/podman/compose -> yes;
+          * a generic wrapper (make/just/task/…) that *could* shell out to docker
+            -> yes only when there's a docker signal (compose file or the guide
+            mentions docker);
+          * a direct app runner (npm/node/python/php/…) -> no, just run it.
         """
-        blob = " ".join(
-            [cmd_str, guide.get("tips", ""), " ".join(guide.get("steps") or [])]
-        ).lower()
-        if "docker" in blob:
+        low = cmd_str.lower()
+        if "docker" in low or "podman" in low or "compose" in low:
             return True
-        return self._find_compose_file() is not None
+        head = (cmd_str.split() or [""])[0].lower()
+        if head in self._DOCKER_WRAPPER_RUNNERS:
+            blob = (guide.get("tips", "") + " " + " ".join(guide.get("steps") or [])).lower()
+            return "docker" in blob or self._find_compose_file() is not None
+        return False
 
     def _try_guided_launch(self, guide: dict) -> List[str]:
         """If the guide names the documented web run-command, actually run it.
@@ -1172,19 +1195,17 @@ class Engine:
 
         from .environment import system_deps
 
-        # If running this needs a container engine, ensure one is up — Docker if
-        # present, else Podman (no admin). The returned PATH prefix (Podman's
-        # `docker` shim) is applied to the launch env so the command routes to it.
+        # Only if the run command itself uses a container engine, ensure one is up
+        # (cached from the services step). A plain `npm run dev` is launched even
+        # when a compose file exists, so apps that don't need Docker still run.
         needs_docker = self._guide_needs_docker(guide, cmd_str)
         if needs_docker:
-            runtime, path_prefix = system_deps.ensure_container_runtime()
+            runtime, _ = self._ensure_runtime()
             if not runtime:
                 console.print(
                     "  [warning]This project needs a container engine to run — see the steps below.[/warning]"
                 )
                 return []
-            if path_prefix:
-                self._extra_path = path_prefix
 
         # Make sure the runner exists. make/just/task are cheap to auto-install;
         # others (docker, etc.) we leave — the launch will report honestly if absent.

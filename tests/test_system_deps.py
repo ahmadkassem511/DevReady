@@ -29,6 +29,20 @@ def test_runtimes_are_dropped_from_install_list():
     assert "nodejs" in runtimes
 
 
+def test_linux_only_packages_dropped_off_linux(monkeypatch):
+    # libfuse2 etc. are Linux apt libs — on Windows/macOS they must be dropped,
+    # not handed to scoop/winget (which can't install them).
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.sys, "platform", "win32")
+    to_install, _ = sd.normalize_packages(["libfuse2", "build-essential", "ffmpeg"])
+    assert to_install == ["ffmpeg"]
+
+    monkeypatch.setattr(sd.sys, "platform", "linux")
+    to_install, _ = sd.normalize_packages(["libfuse2", "ffmpeg"])
+    assert "libfuse2" in to_install  # on Linux it's a real, installable package
+
+
 def test_deduplicates_installable_packages():
     to_install, _ = normalize_packages(["ffmpeg", "FFmpeg", "ffmpeg (latest)"])
     assert to_install == ["ffmpeg"]

@@ -68,6 +68,16 @@ RUNTIME_NAMES = {
     "deno", "bun",
 }
 
+# Debian/apt-style dev libraries that only exist on Linux. READMEs list these for
+# Linux builds (e.g. AppImage needs libfuse2); on Windows/macOS they're neither
+# available nor needed, so we drop them rather than fail trying to install them.
+_LINUX_ONLY_PACKAGES = {
+    "libfuse2", "libfuse", "fuse", "build-essential", "libssl-dev", "libpq-dev",
+    "libffi-dev", "zlib1g-dev", "libxml2-dev", "libxslt1-dev", "libjpeg-dev",
+    "libgl1", "libglib2.0-0", "libsm6", "libxext6", "python3-dev", "python3-venv",
+    "default-libmysqlclient-dev", "pkg-config", "gcc", "g++", "libgtk-3-dev",
+}
+
 # Normalise common human/README spellings to the package-manager id used below.
 # Applied after stripping version specifiers (see _normalize_package).
 NAME_ALIASES = {
@@ -111,6 +121,7 @@ def normalize_packages(packages: List[str]) -> tuple[List[str], List[str]]:
     lists language runtimes that were dropped (so we can tell the user they're
     handled elsewhere).
     """
+    on_linux = sys.platform.startswith("linux")
     to_install: List[str] = []
     runtimes: List[str] = []
     for raw in packages:
@@ -120,6 +131,8 @@ def normalize_packages(packages: List[str]) -> tuple[List[str], List[str]]:
         if cleaned in RUNTIME_NAMES:
             runtimes.append(cleaned)
             continue
+        if not on_linux and cleaned in _LINUX_ONLY_PACKAGES:
+            continue  # Linux-only dev lib, irrelevant on Windows/macOS — drop it
         if cleaned not in to_install:
             to_install.append(cleaned)
     return to_install, runtimes
@@ -670,6 +683,18 @@ def podman_ready() -> bool:
     return run_command(["podman", "info"]).ok
 
 
+def _wsl_available() -> bool:
+    """True if WSL2 looks usable (Windows only).
+
+    Podman's machine (and Docker Desktop) run inside WSL2; enabling WSL needs
+    admin + a reboot. Checking first avoids a slow ``podman machine init`` that
+    downloads an image and only then fails with HCS_E_SERVICE_NOT_AVAILABLE.
+    """
+    if os.name != "nt":
+        return True
+    return run_command(["wsl", "--status"]).ok
+
+
 def _ensure_podman_machine() -> bool:
     """On Windows/macOS, make sure a Podman 'machine' (its small Linux VM) is up.
 
@@ -680,6 +705,14 @@ def _ensure_podman_machine() -> bool:
     """
     if os.name != "nt" and sys.platform != "darwin":
         return podman_ready()  # Linux: native, rootless — no VM to manage
+
+    # Podman's VM needs WSL2 on Windows; bail fast (no slow image pull) if absent.
+    if os.name == "nt" and not _wsl_available():
+        console.print(
+            "  [warning]Podman needs WSL2, which isn't enabled on this machine "
+            "(enabling it needs administrator rights + a restart).[/warning]"
+        )
+        return False
 
     listing = run_command(["podman", "machine", "list", "--format", "{{.Name}}"])
     has_machine = bool(listing.ok and listing.stdout.strip())
