@@ -563,6 +563,34 @@ def _start_docker_daemon() -> bool:
     return run_command(["sudo", "systemctl", "start", "docker"]).ok
 
 
+def _docker_install_guidance() -> List[str]:
+    """OS-specific, actionable steps to install Docker, with the download link."""
+    link = "https://www.docker.com/products/docker-desktop"
+    if os.name == "nt":
+        return [
+            "Docker Desktop must be installed to run this project. On Windows it needs",
+            "administrator rights and a one-time restart (it enables WSL2/virtualization),",
+            "so it can't be installed unattended. To set it up:",
+            f"  1. Download Docker Desktop:  {link}",
+            "  2. Run the installer, approve the admin prompt, then restart Windows.",
+            "  3. Start Docker Desktop once (wait for the whale icon), then run DevReady again.",
+            "  Advanced: from an *Administrator* terminal, run  winget install Docker.DockerDesktop",
+        ]
+    if sys.platform == "darwin":
+        return [
+            "Docker Desktop must be installed to run this project:",
+            f"  • Download:  {link}",
+            "  • Or with Homebrew:  brew install --cask docker",
+            "Then open Docker (wait for the whale icon) and run DevReady again.",
+        ]
+    return [
+        "Docker must be installed to run this project. For example:",
+        "  • Debian/Ubuntu:  sudo apt-get install -y docker.io && sudo systemctl enable --now docker",
+        "  • Fedora:         sudo dnf install -y docker && sudo systemctl enable --now docker",
+        "Then run DevReady again (you may need to add your user to the 'docker' group and re-login).",
+    ]
+
+
 def ensure_docker(wait_seconds: int = 180) -> bool:
     """Ensure Docker is installed *and* its engine is running. Returns usability.
 
@@ -576,15 +604,18 @@ def ensure_docker(wait_seconds: int = 180) -> bool:
         return True
 
     if not command_exists("docker"):
-        console.print("  This project needs [bold]Docker[/bold] — installing it…")
+        console.print("  This project needs [bold]Docker[/bold] — trying to install it…")
         install_tool("docker")
         refresh_path()
 
     if not command_exists("docker"):
+        # Couldn't get Docker on PATH automatically (on Windows it needs admin +
+        # a reboot). Tell the user exactly what to do, with the download link.
         console.print(
-            "  [warning]Docker isn't installed yet. Install Docker Desktop "
-            "(https://www.docker.com/products/docker-desktop) and re-run.[/warning]"
+            "  [warning]Docker isn't available yet — it can't be installed unattended here.[/warning]"
         )
+        for line in _docker_install_guidance():
+            console.print(f"  {line}")
         return False
 
     # Installed but the engine may be stopped — start it and wait (with progress).

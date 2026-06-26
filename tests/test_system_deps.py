@@ -268,6 +268,21 @@ def test_ensure_docker_true_when_daemon_already_running(monkeypatch):
     assert installed == []  # nothing installed; it was already ready
 
 
+def test_docker_install_guidance_is_os_specific(monkeypatch):
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    lines = sd._docker_install_guidance()
+    text = "\n".join(lines).lower()
+    assert "docker.com/products/docker-desktop" in text
+    assert "administrator" in text and "restart" in text  # the Windows reality
+
+    monkeypatch.setattr(sd.os, "name", "posix")
+    monkeypatch.setattr(sd.sys, "platform", "linux")
+    text = "\n".join(sd._docker_install_guidance()).lower()
+    assert "apt-get install" in text or "dnf install" in text
+
+
 def test_docker_desktop_exe_derives_from_cli(tmp_path, monkeypatch):
     # Docker Desktop installs per-user at …/Programs/DockerDesktop with the CLI at
     # …/DockerDesktop/resources/bin/docker.exe. We must find the root launcher.
