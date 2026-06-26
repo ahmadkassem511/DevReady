@@ -393,6 +393,24 @@ def _install_fnm_direct_windows() -> bool:
     return False
 
 
+def _installer_managers() -> List[str]:
+    """Return package managers to try, in order, honouring elevation.
+
+    On Windows this prefers the user-scope managers (winget, scoop) and DROPS
+    choco entirely when not elevated — choco's non-admin warning prompt (a 20s
+    blocking question) can't be answered in the GUI, and it needs admin anyway.
+    choco is included (last) only when DevReady is actually elevated. On other
+    OSes it's just the detected system manager (apt/brew/…, which use sudo).
+    """
+    if os.name == "nt":
+        present = [m for m in ("winget", "scoop", "choco") if command_exists(m)]
+        if not is_elevated():
+            present = [m for m in present if m not in _ADMIN_MANAGERS]
+        return present
+    primary = detect_package_manager()
+    return [primary] if primary else []
+
+
 def install_tool(name: str) -> bool:
     """Install a single tool, picking a strategy that doesn't need admin if possible.
 
@@ -401,9 +419,8 @@ def install_tool(name: str) -> bool:
 
       * On Windows, when *not* running as administrator, it prefers the
         user-scope managers (winget, scoop) and direct binary downloads — these
-        never need admin. choco (which writes to ``C:\\ProgramData``) is tried
-        only when DevReady is elevated, so a normal account never wastes time on
-        choco's admin prompt and lock-file failures.
+        never need admin. choco (which writes to ``C:\\ProgramData`` and shows a
+        blocking non-admin prompt) is used only when DevReady is elevated.
       * When admin really is the only way to install something, it says so
         clearly: re-run from an elevated terminal.
 
@@ -415,37 +432,18 @@ def install_tool(name: str) -> bool:
         return True
 
     elevated = is_elevated()
+    direct = _direct_installer(name)
 
-    # Assemble ordered install strategies. Each returns True on success.
-    strategies: List[tuple[str, Callable[[], bool]]] = []
-
-    if os.name == "nt":
-        present = [m for m in ("winget", "scoop", "choco") if command_exists(m)]
-        # No-admin managers first.
-        for manager in present:
-            if manager not in _ADMIN_MANAGERS:
-                strategies.append((manager, lambda m=manager: _install_with_manager(name, m)))
-        # Direct binary download (no admin, no package manager) — e.g. fnm.
-        direct = _direct_installer(name)
-        if direct:
-            strategies.append(("direct download", direct))
-        # Admin-only managers last, and only when we're actually elevated.
-        for manager in present:
-            if manager in _ADMIN_MANAGERS and elevated:
-                strategies.append((manager, lambda m=manager: _install_with_manager(name, m)))
-    else:
-        primary = detect_package_manager()
-        if primary:
-            strategies.append((primary, lambda m=primary: _install_with_manager(name, m)))
-        direct = _direct_installer(name)
-        if direct:
-            strategies.append(("direct download", direct))
-
-    for label, attempt in strategies:
-        if attempt():
-            console.print(f"  [success]{name} installed via {label}.[/success]")
+    for manager in _installer_managers():
+        if _install_with_manager(name, manager):
+            console.print(f"  [success]{name} installed via {manager}.[/success]")
             return True
-        console.print(f"  [muted]{label} didn't work — trying the next option…[/muted]")
+        console.print(f"  [muted]{manager} didn't work — trying the next option…[/muted]")
+
+    # Direct binary download (no admin, no package manager) — e.g. fnm.
+    if direct and direct() and command_exists(name):
+        console.print(f"  [success]{name} installed.[/success]")
+        return True
 
     # Nothing worked. Explain the most useful next step, depending on *why*.
     return _report_install_failure(name, elevated)
@@ -807,15 +805,16 @@ def ensure_packages(
     if not packages:
         return results
 
-    manager = detect_package_manager()
-    if manager is None:
+    # Elevation-aware manager order — never choco when non-admin (its blocking
+    # non-admin prompt can't be answered in the GUI).
+    managers = _installer_managers()
+    if not managers:
         console.print(
-            "[warning]No supported package manager found. Please install these "
-            f"manually: {', '.join(packages)}[/warning]"
+            "  [warning]No no-admin package manager available to install: "
+            f"{', '.join(packages)}.[/warning]\n"
+            "  [warning]Install them manually, or re-run DevReady as administrator.[/warning]"
         )
         return results
-
-    template = INSTALL_TEMPLATES[manager]
 
     for generic in packages:
         # Skip anything already available — its binary is on PATH.
@@ -823,25 +822,31 @@ def ensure_packages(
             console.print(f"  [muted]{generic} already installed — skipping.[/muted]")
             continue
 
-        pkg = resolve_package_name(generic, manager)
-        command = [part.replace("{pkg}", pkg) for part in template]
-
-        # Ask before changing the system, unless explicitly told not to.
+        # Ask once before changing the system, unless explicitly told not to.
         if not assume_yes:
-            console.print(f"  Install [bold]{generic}[/bold] via [bold]{manager}[/bold]?")
-            console.print(f"    [muted]{' '.join(command)}[/muted]")
+            console.print(f"  Install [bold]{generic}[/bold] via [bold]{managers[0]}[/bold]?")
             answer = console.input("    Proceed? [y/N] ").strip().lower()
             if answer not in ("y", "yes"):
                 console.print(f"  [muted]Skipped {generic}.[/muted]")
                 continue
 
         console.print(f"  Installing [bold]{generic}[/bold]…")
-        # Stream output so the user sees progress for slow installs.
-        result = run_command(command, capture=False)
-        results.append(result)
-        if result.ok:
-            console.print(f"  [success]Installed {generic}.[/success]")
-        else:
-            console.print(f"  [error]Failed to install {generic} (exit {result.returncode}).[/error]")
+        installed_ok = False
+        for manager in managers:
+            pkg = resolve_package_name(generic, manager)
+            command = [part.replace("{pkg}", pkg) for part in INSTALL_TEMPLATES[manager]]
+            result = run_command(command, capture=False)  # streamed
+            results.append(result)
+            if result.ok:
+                _refresh_path(manager)
+                console.print(f"  [success]Installed {generic} via {manager}.[/success]")
+                installed_ok = True
+                break
+            console.print(f"  [muted]{manager} couldn't install {generic} — trying the next option…[/muted]")
+        if not installed_ok:
+            console.print(
+                f"  [warning]Couldn't install {generic} automatically — the app may still "
+                f"work without it, or install it manually.[/warning]"
+            )
 
     return results

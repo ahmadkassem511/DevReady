@@ -246,6 +246,39 @@ def test_fnm_direct_download_skipped_on_non_windows(monkeypatch):
     assert sd._install_fnm_direct_windows() is False
 
 
+def test_ensure_packages_skips_choco_when_not_elevated(monkeypatch):
+    # The bug: README system packages went through choco (non-admin 20s prompt).
+    # Non-admin with only choco available -> no manager used, nothing invoked.
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    monkeypatch.setattr(sd, "is_elevated", lambda: False)
+    monkeypatch.setattr(sd, "command_exists", lambda n: n == "choco")
+    ran = []
+    monkeypatch.setattr(sd, "run_command", lambda *a, **k: ran.append(a))
+
+    assert sd.ensure_packages(["ffmpeg"], assume_yes=True) == []
+    assert ran == []  # choco was NEVER invoked
+
+
+def test_ensure_packages_uses_winget_when_not_elevated(monkeypatch):
+    import devready.environment.system_deps as sd
+    from devready.utils import CommandResult
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    monkeypatch.setattr(sd, "is_elevated", lambda: False)
+    monkeypatch.setattr(sd, "command_exists", lambda n: n == "winget")
+    monkeypatch.setattr(sd, "_refresh_path", lambda m=None: None)
+    ran = []
+    monkeypatch.setattr(
+        sd, "run_command", lambda cmd, **k: ran.append(cmd) or CommandResult(command="x", returncode=0)
+    )
+
+    sd.ensure_packages(["ffmpeg"], assume_yes=True)
+    assert any(c[0] == "winget" for c in ran)
+    assert not any(c[0] == "choco" for c in ran)
+
+
 def test_docker_in_tool_packages():
     from devready.environment.system_deps import TOOL_PACKAGES
 
