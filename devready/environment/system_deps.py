@@ -207,6 +207,14 @@ TOOL_PACKAGES = {
         "brew": "docker", "apt": "docker.io", "apt-get": "docker.io",
         "dnf": "docker", "yum": "docker", "pacman": "docker",
     },
+    # Podman — a daemonless, Docker-compatible container engine used as a NO-ADMIN
+    # fallback when Docker can't be installed (scoop/brew/apt need no elevation).
+    # See ensure_container_runtime().
+    "podman": {
+        "scoop": "podman", "winget": "RedHat.Podman", "choco": "podman-cli",
+        "brew": "podman", "apt": "podman", "apt-get": "podman", "dnf": "podman",
+        "yum": "podman", "pacman": "podman",
+    },
 }
 
 # Where each package manager drops executables, so we can make a freshly
@@ -591,31 +599,34 @@ def _docker_install_guidance() -> List[str]:
     ]
 
 
-def ensure_docker(wait_seconds: int = 180) -> bool:
+def ensure_docker(
+    wait_seconds: int = 180, install_if_missing: bool = True, guidance: bool = True
+) -> bool:
     """Ensure Docker is installed *and* its engine is running. Returns usability.
 
-    Treats Docker like any other dependency: if it isn't installed, install it
-    (Docker Desktop on Windows/macOS — may need admin); if it's installed but the
-    engine is down, start it and wait up to ``wait_seconds`` for it to come up.
-    A first-run Docker Desktop can take a few minutes, so the wait is generous and
-    reports progress.
+    Treats Docker like any other dependency: if it isn't installed (and
+    ``install_if_missing``), install it (Docker Desktop on Windows/macOS — may
+    need admin); if it's installed but the engine is down, start it and wait up
+    to ``wait_seconds`` for it to come up, reporting progress. ``guidance``
+    controls whether the explicit "install Docker Desktop" steps are printed when
+    it can't be made available — the runtime selector turns this off so it can
+    fall back to Podman quietly first.
     """
     if docker_ready():
         return True
 
-    if not command_exists("docker"):
+    if not command_exists("docker") and install_if_missing:
         console.print("  This project needs [bold]Docker[/bold] — trying to install it…")
         install_tool("docker")
         refresh_path()
 
     if not command_exists("docker"):
-        # Couldn't get Docker on PATH automatically (on Windows it needs admin +
-        # a reboot). Tell the user exactly what to do, with the download link.
-        console.print(
-            "  [warning]Docker isn't available yet — it can't be installed unattended here.[/warning]"
-        )
-        for line in _docker_install_guidance():
-            console.print(f"  {line}")
+        if guidance:
+            console.print(
+                "  [warning]Docker isn't available yet — it can't be installed unattended here.[/warning]"
+            )
+            for line in _docker_install_guidance():
+                console.print(f"  {line}")
         return False
 
     # Installed but the engine may be stopped — start it and wait (with progress).
@@ -625,7 +636,7 @@ def ensure_docker(wait_seconds: int = 180) -> bool:
             "  Starting Docker Desktop — the engine can take a few minutes to come up "
             "on first start. Waiting…"
         )
-    else:
+    elif guidance:
         console.print(
             "  [warning]Couldn't find Docker Desktop to start it automatically — "
             "please open Docker Desktop. Waiting for its engine…[/warning]"
@@ -643,11 +654,118 @@ def ensure_docker(wait_seconds: int = 180) -> bool:
             next_notice = time.time() + 30
         time.sleep(3)
 
-    console.print(
-        "  [warning]Docker's engine didn't become ready in time. Once Docker Desktop "
-        "shows 'running', re-run and it'll launch.[/warning]"
-    )
+    if guidance:
+        console.print(
+            "  [warning]Docker's engine didn't become ready in time. Once Docker Desktop "
+            "shows 'running', re-run and it'll launch.[/warning]"
+        )
     return False
+
+
+# -----------------------------------------------------------------------------
+# Podman — a no-admin, Docker-compatible fallback container engine
+# -----------------------------------------------------------------------------
+def podman_ready() -> bool:
+    """True if podman is installed AND able to run containers (engine up)."""
+    if not command_exists("podman"):
+        return False
+    return run_command(["podman", "info"]).ok
+
+
+def _ensure_podman_machine() -> bool:
+    """On Windows/macOS, make sure a Podman 'machine' (its small Linux VM) is up.
+
+    Podman is daemonless and runs containers in a lightweight VM on Windows/macOS;
+    Linux runs them natively (no machine needed). Creates a machine on first use
+    (downloads a small image) and starts it. Best-effort; returns whether podman
+    can run containers afterwards.
+    """
+    if os.name != "nt" and sys.platform != "darwin":
+        return podman_ready()  # Linux: native, rootless — no VM to manage
+
+    listing = run_command(["podman", "machine", "list", "--format", "{{.Name}}"])
+    has_machine = bool(listing.ok and listing.stdout.strip())
+    if not has_machine:
+        console.print("  Creating a Podman machine (one-time; downloads a small Linux image)…")
+        if not run_command(["podman", "machine", "init"], capture=False).ok:
+            return False
+    # Start it (a no-op if already running) and confirm it works.
+    run_command(["podman", "machine", "start"], capture=False)
+    return podman_ready()
+
+
+def ensure_podman() -> bool:
+    """Ensure Podman is installed and able to run containers. No admin required.
+
+    Installs podman via a user-scope manager (scoop/brew/apt) if missing, then
+    brings up its machine (Windows/macOS). Returns True when containers can run.
+    """
+    if podman_ready():
+        return True
+    if not command_exists("podman"):
+        console.print("  Installing [bold]Podman[/bold] (a no-admin Docker alternative)…")
+        install_tool("podman")
+        refresh_path()
+    if not command_exists("podman"):
+        return False
+    return _ensure_podman_machine()
+
+
+def _make_docker_shim() -> Optional[str]:
+    """Create a ``docker`` command that forwards to ``podman``; return its dir.
+
+    Projects (and their ``make dev`` / compose scripts) call ``docker`` directly.
+    Podman is CLI-compatible, so a tiny shim named ``docker`` that execs ``podman``
+    — placed first on PATH — lets those commands run unchanged. Returns the dir to
+    prepend to PATH, or None on failure.
+    """
+    bin_dir = Path.home() / ".devready" / "bin"
+    try:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            (bin_dir / "docker.cmd").write_text("@echo off\r\npodman %*\r\n", encoding="utf-8")
+        else:
+            shim = bin_dir / "docker"
+            shim.write_text('#!/bin/sh\nexec podman "$@"\n', encoding="utf-8")
+            os.chmod(shim, 0o755)
+    except OSError:
+        return None
+    return str(bin_dir)
+
+
+def ensure_container_runtime() -> "tuple[Optional[str], Optional[str]]":
+    """Ensure a usable container engine, preferring Docker, falling back to Podman.
+
+    Returns ``(runtime_name, path_prefix)``:
+      * ``("docker", None)`` — Docker is (now) running; use it as-is.
+      * ``("podman", <dir>)`` — Podman is running; prepend ``<dir>`` to PATH so the
+        ``docker`` shim there routes the project's docker commands to Podman.
+      * ``(None, None)`` — neither could be set up; guidance was printed.
+
+    The Podman path needs no administrator rights, so projects that need a
+    container engine can still run on a locked-down machine.
+    """
+    # 1. Use Docker if it's already installed — just start it (no admin to start).
+    #    We don't trigger the admin-heavy Docker *install* here; Podman is the
+    #    no-admin route when Docker isn't present.
+    if ensure_docker(install_if_missing=False, guidance=False):
+        return ("docker", None)
+
+    # 2. Fall back to Podman (installs + runs without admin).
+    console.print(
+        "  [info]Docker isn't available — setting up Podman instead "
+        "(a no-admin, Docker-compatible engine)…[/info]"
+    )
+    if ensure_podman():
+        shim_dir = _make_docker_shim()
+        console.print("  [success]Podman is ready — using it as the container engine.[/success]")
+        return ("podman", shim_dir)
+
+    # 3. Neither worked — explain how to get a container engine.
+    console.print("  [warning]Couldn't set up a container engine automatically.[/warning]")
+    for line in _docker_install_guidance():
+        console.print(f"  {line}")
+    return (None, None)
 
 
 def is_installed(binary: str) -> bool:

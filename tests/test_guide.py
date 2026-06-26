@@ -86,14 +86,16 @@ def test_try_guided_launch_runs_documented_web_command(tmp_path, monkeypatch):
 
 def test_guided_docker_launch_waits_patiently(tmp_path, monkeypatch):
     # A Docker-based launch must wait a long time (slow first boot) and expect a
-    # detached server — and only after Docker is ensured running.
+    # detached server — and only after a container runtime is ensured.
     import devready.engine as engine_mod
     from devready.environment import system_deps as sd
 
     eng = Engine(project_dir=tmp_path, config=_configured())
     captured = {}
     monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
-    monkeypatch.setattr(sd, "ensure_docker", lambda *a, **k: True)
+    # _try_guided_launch calls ensure_container_runtime — mock that (not the
+    # lower-level ensure_docker), so no real Docker/Podman install is attempted.
+    monkeypatch.setattr(sd, "ensure_container_runtime", lambda: ("docker", None))
 
     def fake_launch(targets, **kwargs):
         captured.update(kwargs)
@@ -113,13 +115,31 @@ def test_guided_docker_launch_waits_patiently(tmp_path, monkeypatch):
     assert captured.get("expect_detached") is True   # `up` may return while it boots
 
 
-def test_guided_docker_launch_aborts_if_docker_unavailable(tmp_path, monkeypatch):
+def test_guided_launch_uses_podman_path_prefix(tmp_path, monkeypatch):
+    # When the runtime falls back to Podman, its `docker` shim dir must be applied
+    # as the launch PATH prefix so the project's docker commands route to podman.
     import devready.engine as engine_mod
     from devready.environment import system_deps as sd
 
     eng = Engine(project_dir=tmp_path, config=_configured())
     monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
-    monkeypatch.setattr(sd, "ensure_docker", lambda *a, **k: False)  # couldn't start docker
+    monkeypatch.setattr(sd, "ensure_container_runtime", lambda: ("podman", r"C:\shim\bin"))
+    monkeypatch.setattr(eng, "_launch_targets", lambda *a, **k: ["http://localhost:8080"])
+
+    served = eng._try_guided_launch(
+        {"has_web_ui": True, "launch_command": "docker compose up", "url": "http://localhost:8080"}
+    )
+    assert served == ["http://localhost:8080"]
+    assert eng._extra_path == r"C:\shim\bin"
+
+
+def test_guided_docker_launch_aborts_if_no_runtime(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    from devready.environment import system_deps as sd
+
+    eng = Engine(project_dir=tmp_path, config=_configured())
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
+    monkeypatch.setattr(sd, "ensure_container_runtime", lambda: (None, None))  # neither available
     monkeypatch.setattr(
         eng, "_launch_targets", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not launch"))
     )

@@ -313,3 +313,49 @@ def test_ensure_docker_installs_when_missing(monkeypatch):
     monkeypatch.setattr(sd, "refresh_path", lambda: None)
     assert sd.ensure_docker() is False
     assert installed == ["docker"]
+
+
+# -- Podman fallback ----------------------------------------------------------
+def test_podman_in_tool_packages():
+    from devready.environment.system_deps import TOOL_PACKAGES
+
+    assert TOOL_PACKAGES["podman"]["scoop"] == "podman"   # no-admin on Windows
+    assert "brew" in TOOL_PACKAGES["podman"]
+    assert "apt" in TOOL_PACKAGES["podman"]
+
+
+def test_container_runtime_prefers_docker_when_ready(monkeypatch):
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd, "ensure_docker", lambda **k: True)
+    assert sd.ensure_container_runtime() == ("docker", None)
+
+
+def test_container_runtime_falls_back_to_podman(monkeypatch, tmp_path):
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd, "ensure_docker", lambda **k: False)   # docker not usable
+    monkeypatch.setattr(sd, "ensure_podman", lambda: True)         # podman works (no admin)
+    monkeypatch.setattr(sd, "_make_docker_shim", lambda: str(tmp_path / "bin"))
+    name, prefix = sd.ensure_container_runtime()
+    assert name == "podman"
+    assert prefix == str(tmp_path / "bin")
+
+
+def test_container_runtime_none_when_neither_available(monkeypatch):
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd, "ensure_docker", lambda **k: False)
+    monkeypatch.setattr(sd, "ensure_podman", lambda: False)
+    assert sd.ensure_container_runtime() == (None, None)
+
+
+def test_make_docker_shim_forwards_to_podman(tmp_path, monkeypatch):
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.Path, "home", lambda: tmp_path)
+    bin_dir = sd._make_docker_shim()
+    assert bin_dir == str(tmp_path / ".devready" / "bin")
+    shim = tmp_path / ".devready" / "bin" / ("docker.cmd" if sd.os.name == "nt" else "docker")
+    assert shim.exists()
+    assert "podman" in shim.read_text()

@@ -66,6 +66,7 @@ class Engine:
         self._install_ok: bool = True  # set False if a dep-install step fails
         self._project_setup_ran: bool = False  # True if the project's own setup ran
         self._attempted_commands: set = set()  # launch commands already tried this run
+        self._extra_path: Optional[str] = None  # dir to prepend on launch (e.g. podman docker-shim)
 
     def _make_healer(self, project_dir: Path):
         """Build a self-healing install executor for a directory.
@@ -476,16 +477,23 @@ class Engine:
             console.print("  [muted]No docker-compose file — skipping.[/muted]")
             return
 
-        # This project ships a compose file, so Docker is a real dependency.
-        # Treat it like any other: install it and start the engine if needed.
-        if not system_deps.ensure_docker():
-            return  # ensure_docker already explained what's needed
+        # This project ships a compose file, so a container engine is a real
+        # dependency. Ensure one is up — Docker if present, else Podman (no admin).
+        runtime, path_prefix = system_deps.ensure_container_runtime()
+        if not runtime:
+            return  # ensure_container_runtime already explained what's needed
+        if path_prefix:
+            self._extra_path = path_prefix
 
         if self._confirm(f"  Start services from {compose.name}? [Y/n] "):
             console.print("  Starting services (docker compose up -d)…")
-            # `docker compose` (v2) is preferred; fall back to the hyphenated v1.
-            base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
-            result = run_command(base + ["up", "-d"], cwd=str(self.project_dir), capture=False)
+            # With Podman, the `docker` shim on PATH (via _launch_env) makes
+            # `docker compose` route to podman. Build an env that includes it.
+            compose_env = self._launch_env()
+            base = ["docker", "compose"]
+            result = run_command(
+                base + ["up", "-d"], cwd=str(self.project_dir), capture=False, env=compose_env
+            )
             if result.ok:
                 console.print("  [success]Services started.[/success]")
                 self._write_state(docker=True)
@@ -665,6 +673,12 @@ class Engine:
         if bash_shell:
             env = env or os.environ.copy()
             env["npm_config_script_shell"] = bash_shell
+
+        # A chosen container runtime may need a dir on PATH (e.g. Podman's
+        # `docker` shim) so the project's docker commands route to it.
+        if self._extra_path:
+            env = env or os.environ.copy()
+            env["PATH"] = self._extra_path + os.pathsep + env.get("PATH", "")
 
         return env
 
@@ -1047,15 +1061,19 @@ class Engine:
 
         from .environment import system_deps
 
-        # If running this needs Docker, make it available first (install + start),
-        # treating Docker as a normal dependency.
+        # If running this needs a container engine, ensure one is up — Docker if
+        # present, else Podman (no admin). The returned PATH prefix (Podman's
+        # `docker` shim) is applied to the launch env so the command routes to it.
         needs_docker = self._guide_needs_docker(guide, cmd_str)
         if needs_docker:
-            if not system_deps.ensure_docker():
+            runtime, path_prefix = system_deps.ensure_container_runtime()
+            if not runtime:
                 console.print(
-                    "  [warning]This project needs Docker to run — see the steps below.[/warning]"
+                    "  [warning]This project needs a container engine to run — see the steps below.[/warning]"
                 )
                 return []
+            if path_prefix:
+                self._extra_path = path_prefix
 
         # Make sure the runner exists. make/just/task are cheap to auto-install;
         # others (docker, etc.) we leave — the launch will report honestly if absent.
