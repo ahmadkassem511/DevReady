@@ -49,6 +49,14 @@ def test_requirements_report_empty_for_unknown(tmp_path):
     assert Engine(project_dir=tmp_path).requirements_report() == []
 
 
+def test_requirements_report_includes_detected_services(tmp_path):
+    # A project that talks to Postgres should surface a 'postgres' service row in
+    # the plan, so the user sees DevReady will provision it.
+    (tmp_path / "requirements.txt").write_text("psycopg2-binary\nflask\n")
+    report = Engine(project_dir=tmp_path).requirements_report()
+    assert "postgres" in [r["name"] for r in report]
+
+
 def test_detect_port_from_log_prefers_announced_url(tmp_path):
     eng = Engine(project_dir=tmp_path)
     log = tmp_path / "run.log"

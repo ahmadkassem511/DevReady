@@ -28,7 +28,7 @@ from rich.table import Table
 from .ai import ReadmeInsights, parse_readme
 from .config import Config, list_projects, register_project
 from .detectors import DetectionResult, detect_stack
-from .environment import env_vars, strategies, system_deps, version_manager
+from .environment import env_vars, services, strategies, system_deps, version_manager
 from .utils import (
     _resolve_windows_executable,
     command_exists,
@@ -484,36 +484,48 @@ class Engine:
             interactive=not self.assume_yes,  # --yes leaves blanks rather than prompting
         )
 
-    # -- Step 6: Docker / service orchestration ------------------------------
+    # -- Step 6: Services (databases / caches / docker-compose) --------------
     def _step_docker(self) -> None:
-        print_step(6, TOTAL_STEPS, "Services (Docker)")
+        print_step(6, TOTAL_STEPS, "Services")
         compose = self._find_compose_file()
-        if compose is None:
-            console.print("  [muted]No docker-compose file — skipping.[/muted]")
+        # Backing services the app needs (Postgres/Redis/MySQL/Mongo), inferred
+        # from its dependency + env files. A compose file usually defines its own.
+        needed = [] if compose is not None else services.detect_services(self.project_dir)
+
+        if compose is None and not needed:
+            console.print("  [muted]No services needed — skipping.[/muted]")
             return
 
-        # This project ships a compose file, so a container engine is a real
-        # dependency. Ensure one is up — Docker if present, else Podman (no admin).
+        # A container engine is now a real dependency — ensure one (Docker if
+        # present, else Podman, no admin).
         runtime, path_prefix = system_deps.ensure_container_runtime()
         if not runtime:
             return  # ensure_container_runtime already explained what's needed
         if path_prefix:
             self._extra_path = path_prefix
+        svc_env = self._launch_env()  # carries the engine's PATH (e.g. podman shim)
 
-        if self._confirm(f"  Start services from {compose.name}? [Y/n] "):
-            console.print("  Starting services (docker compose up -d)…")
-            # With Podman, the `docker` shim on PATH (via _launch_env) makes
-            # `docker compose` route to podman. Build an env that includes it.
-            compose_env = self._launch_env()
-            base = ["docker", "compose"]
-            result = run_command(
-                base + ["up", "-d"], cwd=str(self.project_dir), capture=False, env=compose_env
-            )
-            if result.ok:
-                console.print("  [success]Services started.[/success]")
-                self._write_state(docker=True)
-            else:
-                console.print("  [error]Failed to start services.[/error]")
+        if compose is not None:
+            if self._confirm(f"  Start services from {compose.name}? [Y/n] "):
+                console.print("  Starting services (docker compose up -d)…")
+                result = run_command(
+                    ["docker", "compose", "up", "-d"],
+                    cwd=str(self.project_dir), capture=False, env=svc_env,
+                )
+                if result.ok:
+                    console.print("  [success]Services started.[/success]")
+                    self._write_state(docker=True)
+                else:
+                    console.print("  [error]Failed to start services.[/error]")
+            return
+
+        # No compose file, but the project talks to a database/cache — provision
+        # standard containers for it so the app can actually run.
+        console.print(f"  This project needs: [bold]{', '.join(needed)}[/bold]. Bringing them up…")
+        if self._confirm(f"  Start {', '.join(needed)} via the container engine? [Y/n] "):
+            started = services.ensure_services(needed, env=svc_env)
+            if started:
+                self._write_state(service_containers=started)
 
     def _find_compose_file(self) -> Optional[Path]:
         for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
@@ -1372,13 +1384,26 @@ class Engine:
         else:
             console.print("  [muted]No running processes recorded.[/muted]")
 
+        # Build an env where `docker` resolves even if the engine is Podman (its
+        # shim lives in ~/.devready/bin), so stopping works regardless of engine.
+        svc_env = os.environ.copy()
+        shim_dir = Path.home() / ".devready" / "bin"
+        if shim_dir.exists():
+            svc_env["PATH"] = str(shim_dir) + os.pathsep + svc_env.get("PATH", "")
+
         if state.get("docker") and command_exists("docker"):
             console.print("  Stopping Docker services…")
             base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
-            run_command(base + ["down"], cwd=str(self.project_dir), capture=False)
+            run_command(base + ["down"], cwd=str(self.project_dir), capture=False, env=svc_env)
+
+        # Stop any database/cache containers DevReady provisioned for this project.
+        svc_containers = state.get("service_containers") or []
+        if svc_containers:
+            console.print("  Stopping service containers…")
+            services.stop_services(svc_containers, env=svc_env)
 
         # Clear the runtime fields but keep the state file around.
-        self._write_state(processes=[], pid=None, docker=False)
+        self._write_state(processes=[], pid=None, docker=False, service_containers=[])
 
     # =========================================================================
     # Public command: clean
@@ -1502,7 +1527,26 @@ class Engine:
                 ".env file", needs, "present" if env_exists else "—",
                 env_exists, "generate .env with safe dev defaults"))
 
+        # Backing services (Postgres/Redis/MySQL/Mongo) the app talks to. If a
+        # compose file exists it owns them, so only surface auto-provisioned ones.
+        if self._find_compose_file() is None:
+            for key in services.detect_services(self.project_dir):
+                svc = services.KNOWN_SERVICES.get(key)
+                if not svc:
+                    continue
+                up = self._port_reachable(svc.port)
+                items.append(self._req(
+                    key, "service", "running" if up else "—",
+                    up, f"start {key} ({svc.image}) via the container engine"))
+
         return items
+
+    @staticmethod
+    def _port_reachable(port: int) -> bool:
+        """Quick check whether something is already listening on a local port."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            return sock.connect_ex(("127.0.0.1", port)) == 0
 
     def _print_plan(self) -> None:
         """Print the complete preflight plan (called after README analysis)."""
