@@ -683,56 +683,54 @@ def podman_ready() -> bool:
     return run_command(["podman", "info"]).ok
 
 
-def _wsl_available() -> bool:
-    """True if WSL2 looks usable (Windows only).
-
-    Podman's machine (and Docker Desktop) run inside WSL2; enabling WSL needs
-    admin + a reboot. Checking first avoids a slow ``podman machine init`` that
-    downloads an image and only then fails with HCS_E_SERVICE_NOT_AVAILABLE.
-    """
-    if os.name != "nt":
-        return True
-    return run_command(["wsl", "--status"]).ok
-
-
 def _ensure_podman_machine() -> bool:
-    """On Windows/macOS, make sure a Podman 'machine' (its small Linux VM) is up.
+    """Make sure Podman can run containers; manage its VM on Windows/macOS.
 
-    Podman is daemonless and runs containers in a lightweight VM on Windows/macOS;
-    Linux runs them natively (no machine needed). Creates a machine on first use
-    (downloads a small image) and starts it. Best-effort; returns whether podman
-    can run containers afterwards.
+    Podman runs containers natively (rootless) on Linux — no VM. On Windows/macOS
+    it needs a lightweight Linux VM ("machine"). Crucially, *creating* a new VM on
+    **Windows** needs WSL2 + the Virtual Machine Platform — the same admin+reboot
+    prerequisite as Docker Desktop — and ``podman machine init`` is slow and fails
+    hard without it (HCS_E_SERVICE_NOT_AVAILABLE). So on Windows we only USE Podman
+    when a machine already exists; we never try to create one. On macOS the VM is
+    no-admin, so we create it as needed.
     """
     if os.name != "nt" and sys.platform != "darwin":
         return podman_ready()  # Linux: native, rootless — no VM to manage
 
-    # Podman's VM needs WSL2 on Windows; bail fast (no slow image pull) if absent.
-    if os.name == "nt" and not _wsl_available():
+    listing = run_command(["podman", "machine", "list", "--format", "{{.Name}}"])
+    has_machine = bool(listing.ok and listing.stdout.strip())
+
+    if os.name == "nt" and not has_machine:
         console.print(
-            "  [warning]Podman needs WSL2, which isn't enabled on this machine "
-            "(enabling it needs administrator rights + a restart).[/warning]"
+            "  [muted]Podman would need to create a WSL2 VM here, which requires the same "
+            "admin + restart as Docker — skipping that path.[/muted]"
         )
         return False
 
-    listing = run_command(["podman", "machine", "list", "--format", "{{.Name}}"])
-    has_machine = bool(listing.ok and listing.stdout.strip())
     if not has_machine:
+        # macOS only: a lightweight VM that needs no admin.
         console.print("  Creating a Podman machine (one-time; downloads a small Linux image)…")
         if not run_command(["podman", "machine", "init"], capture=False).ok:
             return False
-    # Start it (a no-op if already running) and confirm it works.
+
     run_command(["podman", "machine", "start"], capture=False)
     return podman_ready()
 
 
 def ensure_podman() -> bool:
-    """Ensure Podman is installed and able to run containers. No admin required.
+    """Ensure Podman can run containers. Returns True when it can.
 
-    Installs podman via a user-scope manager (scoop/brew/apt) if missing, then
-    brings up its machine (Windows/macOS). Returns True when containers can run.
+    On Linux/macOS Podman is a genuine no-admin engine, so we install it
+    (scoop/brew/apt) and bring up its VM if needed. On **Windows** Podman needs a
+    WSL2 VM (admin + reboot) exactly like Docker, so we only use it when it's
+    ALREADY installed and set up — we don't install/init it just to fail.
     """
     if podman_ready():
         return True
+    # On Windows, don't install Podman speculatively — its VM can't be created
+    # without the same admin/WSL2 Docker needs.
+    if os.name == "nt" and not command_exists("podman"):
+        return False
     if not command_exists("podman"):
         console.print("  Installing [bold]Podman[/bold] (a no-admin Docker alternative)…")
         install_tool("podman")
@@ -782,18 +780,19 @@ def ensure_container_runtime() -> "tuple[Optional[str], Optional[str]]":
     if ensure_docker(install_if_missing=False, guidance=False):
         return ("docker", None)
 
-    # 2. Fall back to Podman (installs + runs without admin).
-    console.print(
-        "  [info]Docker isn't available — setting up Podman instead "
-        "(a no-admin, Docker-compatible engine)…[/info]"
-    )
+    # 2. Fall back to Podman (a genuine no-admin engine on Linux/macOS; on Windows
+    #    only if already set up). ensure_podman() is quiet/fast when it can't help.
     if ensure_podman():
         shim_dir = _make_docker_shim()
-        console.print("  [success]Podman is ready — using it as the container engine.[/success]")
+        console.print("  [success]Using Podman as the container engine.[/success]")
         return ("podman", shim_dir)
 
-    # 3. Neither worked — explain how to get a container engine.
-    console.print("  [warning]Couldn't set up a container engine automatically.[/warning]")
+    # 3. Neither worked. Be clear: the app itself may still run — only Docker-based
+    #    services need this — and show how to enable them.
+    console.print(
+        "  [warning]No container engine available — Docker-based services can't start. "
+        "DevReady will still set up and run the app where possible.[/warning]"
+    )
     for line in _docker_install_guidance():
         console.print(f"  {line}")
     return (None, None)

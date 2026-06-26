@@ -397,6 +397,38 @@ def test_container_runtime_none_when_neither_available(monkeypatch):
     assert sd.ensure_container_runtime() == (None, None)
 
 
+def test_ensure_podman_skips_install_on_windows_when_absent(monkeypatch):
+    # On Windows, Podman's VM needs the same admin/WSL2 as Docker — don't install
+    # it speculatively (avoids the slow `podman machine init` that fails on HCS).
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    monkeypatch.setattr(sd, "podman_ready", lambda: False)
+    monkeypatch.setattr(sd, "command_exists", lambda n: False)  # podman not installed
+    installed = []
+    monkeypatch.setattr(sd, "install_tool", lambda name: installed.append(name) or True)
+
+    assert sd.ensure_podman() is False
+    assert installed == []  # never tried to install podman
+
+
+def test_ensure_podman_machine_no_init_on_windows_without_machine(monkeypatch):
+    # Windows + no existing machine -> skip (no slow `podman machine init`).
+    import devready.environment.system_deps as sd
+    from devready.utils import CommandResult
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    ran = []
+
+    def fake_run(cmd, **k):
+        ran.append(cmd)
+        return CommandResult(command="x", returncode=0, stdout="")  # `machine list` empty
+
+    monkeypatch.setattr(sd, "run_command", fake_run)
+    assert sd._ensure_podman_machine() is False
+    assert not any("init" in c for c in ran)  # never attempted machine init
+
+
 def test_make_docker_shim_forwards_to_podman(tmp_path, monkeypatch):
     import devready.environment.system_deps as sd
 
