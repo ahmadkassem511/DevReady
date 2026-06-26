@@ -240,9 +240,34 @@ def test_interpreter_version_of_current_python():
     assert _interpreter_version(sys.executable) == expected
 
 
-def test_resolve_none_returns_current_interpreter():
-    # With no required version, any Python works -> the current one.
-    assert resolve_python_interpreter(None) == sys.executable
+def test_resolve_none_uses_current_when_well_supported(monkeypatch):
+    # No required version + a well-supported running Python -> use the current one.
+    import devready.environment.version_manager as vm
+
+    monkeypatch.setattr(vm, "_current_python_version", lambda: (3, 11))
+    assert vm.resolve_python_interpreter(None) == sys.executable
+
+
+def test_resolve_none_prefers_stable_on_bleeding_edge(monkeypatch):
+    # No required version + a bleeding-edge running Python (e.g. 3.14) -> prefer a
+    # broadly-compatible line so packages install from wheels, not source builds.
+    import devready.environment.version_manager as vm
+
+    monkeypatch.setattr(vm, "_current_python_version", lambda: (3, 14))
+    monkeypatch.setattr(
+        vm, "find_installed_python", lambda v: r"C:\py312\python.exe" if v == "3.12" else None
+    )
+    assert vm.resolve_python_interpreter(None) == r"C:\py312\python.exe"
+
+
+def test_resolve_none_falls_back_to_current_if_no_stable_available(monkeypatch):
+    # Bleeding-edge, but no stable line installed and uv can't fetch one -> current.
+    import devready.environment.version_manager as vm
+
+    monkeypatch.setattr(vm, "_current_python_version", lambda: (3, 14))
+    monkeypatch.setattr(vm, "find_installed_python", lambda v: None)
+    monkeypatch.setattr(vm, "install_python_with_uv", lambda v: None)
+    assert vm.resolve_python_interpreter(None) == sys.executable
 
 
 def test_find_matches_running_interpreter():

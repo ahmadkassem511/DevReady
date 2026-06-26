@@ -64,6 +64,27 @@ def test_detect_port_from_log_falls_back_when_silent(tmp_path):
     assert eng._detect_port_from_log(log, fallback=8000) == 8000
 
 
+def test_scan_build_error_finds_module_not_found(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    log = tmp_path / "run.log"
+    log.write_text(
+        "> next dev\n ready - started server on 0.0.0.0:3000\n"
+        "Module not found: Can't resolve 'design-agent'\n  at ./src/x.jsx\n"
+    )
+    snippet = eng._scan_build_error(log)
+    assert snippet and "design-agent" in snippet
+
+
+def test_scan_build_error_none_on_clean_log(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    log = tmp_path / "run.log"
+    log.write_text(
+        "> next dev\n ready - started server on 0.0.0.0:3000\n- compiled successfully\n",
+        encoding="utf-8",
+    )
+    assert eng._scan_build_error(log) is None
+
+
 def test_launch_env_uses_pinned_node_bin(tmp_path, monkeypatch):
     # When a project pins a Node version the system doesn't meet, the launch env
     # must put that Node's bin dir first on PATH (so `npm run dev` doesn't run on

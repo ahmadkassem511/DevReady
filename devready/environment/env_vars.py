@@ -24,6 +24,11 @@ from ..utils import console
 # value rather than a placeholder.
 _SECRET_HINTS = ("secret", "token", "key", "password", "passwd")
 
+# Template filenames projects use, in priority order (first present wins).
+_ENV_EXAMPLE_NAMES = (
+    ".env.example", ".env.sample", ".env.template", ".env.dist", ".env.local.example",
+)
+
 # Reasonable local defaults for well-known variables, so the app can boot.
 _KNOWN_DEFAULTS = {
     "PORT": "3000",
@@ -97,15 +102,18 @@ def generate_env_file(
         console.print("  [muted].env already exists — leaving it untouched.[/muted]")
         return None
 
-    # Merge the two sources. .env.example is authoritative for names/order;
+    # Merge the two sources. The example file is authoritative for names/order;
     # README-discovered vars fill in anything the example missed.
     variables: Dict[str, str] = {}
 
-    example = project_dir / ".env.example"
-    if example.exists():
-        for name, example_value in _parse_example(example.read_text(encoding="utf-8")).items():
-            # Keep a non-empty example value as the default; otherwise derive one.
-            variables[name] = example_value or _default_value_for(name)
+    # Projects name their template various things — use the first one present.
+    for example_name in _ENV_EXAMPLE_NAMES:
+        example = project_dir / example_name
+        if example.exists():
+            for name, example_value in _parse_example(example.read_text(encoding="utf-8")).items():
+                # Keep a non-empty example value as the default; otherwise derive one.
+                variables[name] = example_value or _default_value_for(name)
+            break
 
     for name in (readme_env_vars or {}):
         variables.setdefault(name, _default_value_for(name))

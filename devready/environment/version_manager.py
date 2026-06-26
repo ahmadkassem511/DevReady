@@ -184,25 +184,61 @@ def _venv_python_tool(venv_dir: Path, tool: str) -> str:
 # -----------------------------------------------------------------------------
 # Python interpreter resolution (the "smart hybrid" version manager)
 # -----------------------------------------------------------------------------
+# The newest Python line with broad prebuilt-wheel coverage across the ecosystem.
+# When a project pins no version and the interpreter running DevReady is newer
+# than this, common packages (numpy, pandas, torch, cryptography, …) often have
+# no wheels yet and fall back to slow/failing source builds — so we provision a
+# well-supported line instead. Bump this as the ecosystem catches up.
+_WELL_SUPPORTED_PYTHON = (3, 12)
+_PREFERRED_PYTHON_FALLBACKS = ("3.12", "3.11")
+
+
+def _current_python_version() -> Tuple[int, int]:
+    """Return the (major, minor) of the interpreter running DevReady."""
+    return (sys.version_info.major, sys.version_info.minor)
+
+
 def resolve_python_interpreter(required_version: Optional[str]) -> Optional[str]:
-    """Return a path to a Python interpreter matching ``required_version``.
+    """Return a path to a Python interpreter for this project.
 
-    Strategy (see module docstring):
-      1. Reuse an already-installed matching interpreter.
-      2. If none exists, download the exact version with uv (isolated).
-
-    When no version is required, the interpreter running DevReady is returned —
-    there's nothing to match against, so any Python will do.
+    Strategy:
+      1. If a version is required, reuse an installed match or download it (uv).
+      2. If none is required, use the running interpreter — UNLESS it's newer
+         than the well-supported line, in which case prefer a broadly-compatible
+         version (3.12/3.11) so packages install from wheels rather than failing
+         to build from source on a bleeding-edge interpreter.
     """
-    if not required_version:
-        return sys.executable
+    if required_version:
+        found = find_installed_python(required_version)
+        if found:
+            return found
+        console.print(f"  No Python {required_version} found locally — fetching it with uv…")
+        return install_python_with_uv(required_version)
 
-    found = find_installed_python(required_version)
-    if found:
-        return found
+    # No version pinned.
+    current = _current_python_version()
+    if current <= _WELL_SUPPORTED_PYTHON:
+        return sys.executable  # already a well-supported version — use it
 
-    console.print(f"  No Python {required_version} found locally — fetching it with uv…")
-    return install_python_with_uv(required_version)
+    # The running interpreter is newer than the well-supported line. Prefer a
+    # stable one for the best package compatibility (reuse if present, else fetch).
+    for ver in _PREFERRED_PYTHON_FALLBACKS:
+        found = find_installed_python(ver)
+        if found:
+            console.print(
+                f"  Using Python {ver} for the best package compatibility "
+                f"(your default Python is {current[0]}.{current[1]}, which many packages "
+                f"don't ship wheels for yet)."
+            )
+            return found
+    for ver in _PREFERRED_PYTHON_FALLBACKS:
+        console.print(f"  Fetching Python {ver} with uv for broad package compatibility…")
+        installed = install_python_with_uv(ver)
+        if installed:
+            return installed
+
+    # Couldn't obtain a stable line — proceed with the current interpreter.
+    return sys.executable
 
 
 def find_installed_python(required_version: str) -> Optional[str]:

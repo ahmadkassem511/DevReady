@@ -805,10 +805,22 @@ class Engine:
             port = record.get("port")  # reachable port, or None
             announced = record.get("announced_port")
 
+            log_name = "last-run.log" if name == "root" else f"last-run-{name}.log"
+            log_path = self._state_dir / log_name
+
             if port:
                 url = f"http://localhost:{port}"
                 served.append(url)
                 console.print(f"  [success]✓ {name} → {url}[/success]")
+                # The server bound its port, but its own code may still have a
+                # build/compile error (dev servers serve an error overlay). Say so
+                # honestly rather than implying everything's fine.
+                build_err = self._scan_build_error(log_path)
+                if build_err:
+                    console.print(
+                        f"  [warning]Heads up: {name} started, but the project's own code reported "
+                        f"a build error — the page may show it:[/warning]\n  [muted]{build_err}[/muted]"
+                    )
                 if not opened:
                     try:
                         webbrowser.open(url)
@@ -822,8 +834,7 @@ class Engine:
                     f"  [muted]It may still be building (some dev servers take a few minutes) or "
                     f"it serves on a different port. Recent output:[/muted]"
                 )
-                log_name = "last-run.log" if name == "root" else f"last-run-{name}.log"
-                self._print_log_tail(self._state_dir / log_name, lines=12)
+                self._print_log_tail(log_path, lines=12)
             else:
                 # A CLI / worker with no web URL — alive is success.
                 console.print(f"  [success]✓ {name} is running[/success] (no web URL).")
@@ -831,6 +842,35 @@ class Engine:
         if served:
             console.print("  Stop everything with [bold]devready stop[/bold].")
         return served
+
+    # Signatures of a build/compile error in a dev server's output. Lower-cased
+    # match — covers webpack/Next/Vite/TS/Node/Python module-resolution failures.
+    _BUILD_ERROR_SIGNATURES = (
+        "module not found", "cannot find module", "can't resolve", "failed to compile",
+        "build error", "modulenotfounderror", "no module named", "cannot resolve",
+        "error: cannot find", "ts error", "pre-transform error", "[plugin:vite",
+    )
+
+    def _scan_build_error(self, log_path: Path) -> Optional[str]:
+        """Return a short build-error snippet from a server's log, or None.
+
+        Best-effort: dev servers bind their port even when the app fails to
+        compile, so this lets us warn the user instead of a misleading "running".
+        """
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        lowered = text.lower()
+        for sig in self._BUILD_ERROR_SIGNATURES:
+            idx = lowered.find(sig)
+            if idx != -1:
+                # Return the line containing the signature, trimmed.
+                line_start = text.rfind("\n", 0, idx) + 1
+                line_end = text.find("\n", idx)
+                line = text[line_start: line_end if line_end != -1 else len(text)].strip()
+                return line[:200] if line else None
+        return None
 
     def _resolve_launch(self) -> Tuple[Optional[List[str]], Optional[int]]:
         """Return ``(command, port)`` for starting the project, or ``(None, None)``.
