@@ -539,34 +539,78 @@ class Engine:
         """True if the modern ``docker compose`` subcommand is available."""
         return run_command(["docker", "compose", "version"]).ok
 
+    def _migration_env(self) -> dict:
+        """Environment for migration commands: pinned toolchain PATH + the project's .env.
+
+        Migration tools (Django, Prisma, knex, Rails…) read connection settings
+        like ``DATABASE_URL`` from the environment, and DevReady just wrote them
+        into ``.env`` and started the matching DB container. We load that ``.env``
+        into the subprocess env so the migration connects to the right database.
+        """
+        env = self._launch_env() or os.environ.copy()
+        env_file = self.project_dir / ".env"
+        if env_file.exists():
+            try:
+                for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    name, _, value = line.partition("=")
+                    name = name.strip()
+                    if name and name.upper() != "PATH":  # never let .env clobber PATH
+                        env[name] = value.strip()
+            except OSError:
+                pass
+        return env
+
     # -- Step 7: Database migrations -----------------------------------------
     def _step_migrations(self) -> None:
         print_step(7, TOTAL_STEPS, "Database Migrations")
+
+        env = self._migration_env()
+        cwd = str(self.project_dir)
 
         # Prefer explicit db_commands the README/LLM gave us.
         if self.insights.db_commands:
             for cmd in self.insights.db_commands:
                 console.print(f"  Running: [muted]{cmd}[/muted]")
-                run_command(cmd, cwd=str(self.project_dir), shell=True, capture=False)
+                run_command(cmd, cwd=cwd, shell=True, capture=False, env=env)
             return
 
-        # Otherwise, auto-detect a common migration tool.
+        # Otherwise, auto-detect a common migration tool. Runs against the DB
+        # DevReady provisioned in step 6, with the project's .env loaded.
         py = version_manager.python_executable(self.project_dir)
+        prisma_schema = self._find_first(["prisma/schema.prisma", "schema.prisma"])
+
         if (self.project_dir / "manage.py").exists() and py:
             console.print("  Detected Django — running migrate…")
-            run_command([py, "manage.py", "migrate"], cwd=str(self.project_dir), capture=False)
+            run_command([py, "manage.py", "migrate", "--noinput"], cwd=cwd, capture=False, env=env)
         elif (self.project_dir / "alembic.ini").exists() and py:
             console.print("  Detected Alembic — running upgrade head…")
-            run_command([py, "-m", "alembic", "upgrade", "head"], cwd=str(self.project_dir), capture=False)
+            run_command([py, "-m", "alembic", "upgrade", "head"], cwd=cwd, capture=False, env=env)
+        elif prisma_schema:
+            console.print("  Detected Prisma — generating client and applying migrations…")
+            run_command(["npx", "--yes", "prisma", "generate"], cwd=cwd, capture=False, env=env)
+            # `migrate deploy` applies committed migrations; if there are none,
+            # `db push` syncs the schema so the app has its tables either way.
+            deploy = run_command(
+                ["npx", "--yes", "prisma", "migrate", "deploy"], cwd=cwd, capture=False, env=env
+            )
+            if not deploy.ok:
+                console.print("  [muted]No migrations to deploy — syncing schema with db push…[/muted]")
+                run_command(
+                    ["npx", "--yes", "prisma", "db", "push", "--accept-data-loss"],
+                    cwd=cwd, capture=False, env=env,
+                )
         elif (self.project_dir / "knexfile.js").exists():
             console.print("  Detected Knex — running migrations…")
-            run_command(["npx", "knex", "migrate:latest"], cwd=str(self.project_dir), capture=False)
+            run_command(["npx", "--yes", "knex", "migrate:latest"], cwd=cwd, capture=False, env=env)
         elif (self.project_dir / "bin" / "rails").exists() or (self.project_dir / "config" / "database.yml").exists():
-            console.print("  Detected Rails — running db:migrate…")
-            run_command(["bundle", "exec", "rails", "db:migrate"], cwd=str(self.project_dir), capture=False)
+            console.print("  Detected Rails — running db:prepare…")
+            run_command(["bundle", "exec", "rails", "db:prepare"], cwd=cwd, capture=False, env=env)
         elif (self.project_dir / "artisan").exists():
             console.print("  Detected Laravel — running migrate…")
-            run_command(["php", "artisan", "migrate", "--force"], cwd=str(self.project_dir), capture=False)
+            run_command(["php", "artisan", "migrate", "--force"], cwd=cwd, capture=False, env=env)
         else:
             console.print("  [muted]No migration tool detected — skipping.[/muted]")
 

@@ -57,6 +57,48 @@ def test_requirements_report_includes_detected_services(tmp_path):
     assert "postgres" in [r["name"] for r in report]
 
 
+def test_migration_env_loads_project_dotenv(tmp_path, monkeypatch):
+    # Migration tools read DATABASE_URL from the env — DevReady must load the
+    # project's .env into the migration subprocess (without clobbering PATH).
+    import devready.engine as engine_mod
+
+    (tmp_path / ".env").write_text(
+        "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/app_dev\n"
+        "# a comment\nPATH=/evil/should/not/win\n"
+    )
+    eng = Engine(project_dir=tmp_path)
+    monkeypatch.setattr(eng, "_launch_env", lambda: {"PATH": "/real/path"})
+    env = eng._migration_env()
+    assert env["DATABASE_URL"].endswith("/app_dev")
+    assert env["PATH"] == "/real/path"  # .env's PATH was ignored
+
+
+def test_step_migrations_runs_prisma(tmp_path, monkeypatch):
+    # A Prisma project should get `prisma generate` + `prisma migrate deploy`.
+    import devready.engine as engine_mod
+    from devready.ai import ReadmeInsights
+
+    (tmp_path / "prisma").mkdir()
+    (tmp_path / "prisma" / "schema.prisma").write_text('datasource db { provider = "postgresql" }')
+
+    from devready.utils import CommandResult
+
+    eng = Engine(project_dir=tmp_path)
+    eng.insights = ReadmeInsights()  # no explicit db_commands
+    monkeypatch.setattr(eng, "_migration_env", lambda: {"PATH": "x"})
+
+    ran = []
+    monkeypatch.setattr(
+        engine_mod, "run_command",
+        lambda cmd, **k: ran.append(cmd) or CommandResult(command="x", returncode=0),
+    )
+
+    eng._step_migrations()
+    joined = [" ".join(c) if isinstance(c, list) else c for c in ran]
+    assert any("prisma generate" in j for j in joined)
+    assert any("prisma migrate deploy" in j for j in joined)
+
+
 def test_detect_port_from_log_prefers_announced_url(tmp_path):
     eng = Engine(project_dir=tmp_path)
     log = tmp_path / "run.log"
