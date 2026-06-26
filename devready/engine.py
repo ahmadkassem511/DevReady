@@ -345,15 +345,30 @@ class Engine:
     def _init_submodules(self) -> None:
         """Fetch git submodules when the repo declares them (``.gitmodules``).
 
-        DevReady clones shallowly, so submodules aren't present; many projects'
-        own build/run commands depend on them. Best-effort and quiet when absent.
+        DevReady (and the GUI) clone shallowly for speed, so submodules aren't
+        present; many projects' own build/run commands depend on them. A *shallow*
+        superproject also can't resolve the exact commits submodules are pinned to
+        — they'd fall back to a branch tip (wrong code, missing packages). So we
+        un-shallow first, then init recursively. Best-effort and quiet when absent.
         """
         if not (self.project_dir / ".gitmodules").exists():
             return
         console.print("  Fetching git submodules (this repo uses them)…")
+        cwd = str(self.project_dir)
+
+        is_shallow = run_command(
+            ["git", "rev-parse", "--is-shallow-repository"], cwd=cwd
+        ).stdout.strip() == "true"
+        if is_shallow:
+            console.print(
+                "  [muted]Fetching full history so submodules check out at the right commit…[/muted]"
+            )
+            run_command(["git", "fetch", "--unshallow"], cwd=cwd, capture=False)
+
+        run_command(["git", "submodule", "sync", "--recursive"], cwd=cwd)
         run_command(
-            ["git", "submodule", "update", "--init", "--recursive"],
-            cwd=str(self.project_dir),
+            ["git", "submodule", "update", "--init", "--recursive", "--force"],
+            cwd=cwd,
             capture=False,
         )
 

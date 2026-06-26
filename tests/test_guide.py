@@ -180,10 +180,15 @@ def test_guide_needs_docker_detection(tmp_path):
 
 def test_init_submodules_runs_only_with_gitmodules(tmp_path, monkeypatch):
     import devready.engine as engine_mod
+    from devready.utils import CommandResult
 
     eng = Engine(project_dir=tmp_path)
     ran = []
-    monkeypatch.setattr(engine_mod, "run_command", lambda cmd, **k: ran.append(cmd))
+    # Return a non-shallow result so _init_submodules skips the unshallow fetch.
+    monkeypatch.setattr(
+        engine_mod, "run_command",
+        lambda cmd, **k: ran.append(cmd) or CommandResult(command="x", returncode=0, stdout="false"),
+    )
 
     eng._init_submodules()  # no .gitmodules -> no-op
     assert ran == []
