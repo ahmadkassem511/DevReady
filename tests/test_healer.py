@@ -155,6 +155,57 @@ def test_llm_give_up_stops_loop(monkeypatch, tmp_path):
     assert calls["n"] == 1  # asked once, then stopped on give_up
 
 
+def test_venv_rewrite_routes_pip_to_the_project_interpreter():
+    # ROOT FIX: the AI's `pip install X` must run in the venv, not global pip.
+    h = InstallHealer(_unconfigured(), __import__("pathlib").Path("."))
+    venv = r"C:\proj\.venv\Scripts\python.exe"
+    assert h._venv_rewrite("pip install torch", venv) == [venv, "-m", "pip", "install", "torch"]
+    assert h._venv_rewrite("python setup.py build", "/venv/bin/python") == ["/venv/bin/python", "setup.py", "build"]
+    assert h._venv_rewrite("make build", "/venv/bin/python") is None   # not pip/python
+    assert h._venv_rewrite("pip install x", None) is None              # no interpreter known
+
+
+def test_pip_requirements_target_parsing():
+    h = InstallHealer(_unconfigured(), __import__("pathlib").Path("."))
+    interp, req = h._pip_requirements_target(["/venv/py", "-m", "pip", "install", "-r", "requirements.txt"])
+    assert interp == "/venv/py" and req == "requirements.txt"
+    assert h._pip_requirements_target(["npm", "install"]) == (None, None)
+
+
+def test_failing_package_identified_from_pip_error():
+    h = InstallHealer(_unconfigured(), __import__("pathlib").Path("."))
+    lines = ["torch==2.5.1", "transformers==4.49.0", "flash_attn"]
+    err = "ERROR: Failed to build 'flash_attn' when getting requirements to build wheel"
+    assert h._failing_package(err, lines, [0, 1, 2]) == 2
+    # version-pin-not-found is also recognised
+    err2 = "ERROR: No matching distribution found for torch==2.5.1"
+    assert h._failing_package(err2, lines, [0, 1, 2]) == 0
+
+
+def test_resilient_pip_install_drops_unbuildable_package(tmp_path, monkeypatch):
+    # ROOT FIX: one unbuildable dep (flash_attn) must NOT fail the whole install —
+    # install the rest and skip it.
+    import devready.ai.healer as h_mod
+    from devready.utils import CommandResult
+
+    (tmp_path / "requirements.txt").write_text("torch==2.5.1\ntransformers==4.49.0\nflash_attn\n")
+    h = InstallHealer(_unconfigured(), tmp_path)
+
+    calls = []
+
+    def fake_teed(cmd, **kwargs):
+        calls.append(cmd)
+        return CommandResult(" ".join(cmd), 0, stdout="ok")  # retry-without-flash_attn succeeds
+
+    monkeypatch.setattr(h_mod, "run_command_teed", fake_teed)
+    last = CommandResult("pip install -r requirements.txt", 1, stdout="Failed to build 'flash_attn'")
+    result = h._resilient_pip_install(
+        str(tmp_path / ".venv" / "python"), "requirements.txt", str(tmp_path), None, last
+    )
+    assert result.ok
+    assert any("-r" in c and "install" in c for c in calls)  # reinstalled the rest
+
+
 def test_unsafe_suggested_command_is_skipped(monkeypatch, tmp_path):
     # The LLM proposes a destructive 'run' command — it must be filtered out.
     from devready.ai.healer import InstallHealer

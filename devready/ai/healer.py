@@ -23,9 +23,11 @@ strictly a superset of the old inline retry logic.
 from __future__ import annotations
 
 import os
+import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 from ..config import Config
 from ..utils import CommandResult, console, run_command, run_command_teed
@@ -114,9 +116,124 @@ class InstallHealer:
             if result.ok:
                 return result
 
-        # 2. LLM-guided healing loop (only if a key is configured).
+        # 2. Resilient requirements install: if a single dependency can't be built
+        #    or found (e.g. a CUDA/compiler package like flash_attn on a CPU box),
+        #    install everything ELSE and skip the offender — so the project still
+        #    gets set up instead of failing wholesale.
+        interpreter, req_file = self._pip_requirements_target(command)
+        if req_file:
+            result = self._resilient_pip_install(interpreter, req_file, cwd, env, result)
+            if result.ok:
+                return result
+
+        # 3. LLM-guided healing loop (only if a key is configured). Fixes run in
+        #    the project's interpreter, not a global one.
         if self.config.llm.is_configured:
-            result = self._heal_loop(list(command), cwd, result, description, env)
+            result = self._heal_loop(list(command), cwd, result, description, env, interpreter)
+        return result
+
+    # -- resilient requirements install --------------------------------------
+    @staticmethod
+    def _pip_requirements_target(command: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
+        """If ``command`` is a ``pip install -r <file>``, return (interpreter, file).
+
+        ``interpreter`` is the venv python when the command is
+        ``<py> -m pip install -r <file>`` (so retries stay in the venv); else None.
+        Returns (None, None) when it isn't a requirements install.
+        """
+        cmd = list(command)
+        lower = [c.lower() for c in cmd]
+        if "pip" not in " ".join(lower) or "install" not in lower or "-r" not in cmd:
+            return (None, None)
+        interpreter = cmd[0] if len(cmd) > 2 and cmd[1] == "-m" and cmd[2] == "pip" else None
+        try:
+            req_file = cmd[cmd.index("-r") + 1]
+        except (ValueError, IndexError):
+            return (None, None)
+        return (interpreter, req_file)
+
+    @staticmethod
+    def _requirement_name(line: str) -> Optional[str]:
+        """Extract a normalised package name from a requirements line, or None."""
+        s = line.strip()
+        if not s or s.startswith(("#", "-")):
+            return None
+        name = re.split(r"[<>=!~;\[ ]", s, maxsplit=1)[0].strip()
+        return name.lower().replace("_", "-") or None
+
+    def _failing_package(self, error_text: str, lines: List[str], active: List[int]) -> Optional[int]:
+        """Return the index of the active requirement line pip failed on, or None."""
+        text = (error_text or "").lower()
+        patterns = (
+            r"failed to build '?([a-z0-9_.\-]+)'?",
+            r"could not build wheels? for ([a-z0-9_.\-]+)",
+            r"failed building wheel for ([a-z0-9_.\-]+)",
+            r"no matching distribution found for ([a-z0-9_.\-]+)",
+            r"could not find a version that satisfies the requirement ([a-z0-9_.\-]+)",
+            r"error: could not build wheels for ([a-z0-9_.\-]+)",
+        )
+        names = set()
+        for pat in patterns:
+            for m in re.findall(pat, text):
+                names.add(m.strip().replace("_", "-"))
+        if not names:
+            return None
+        for i in active:
+            pn = self._requirement_name(lines[i])
+            if pn and pn in names:
+                return i
+        return None
+
+    def _resilient_pip_install(
+        self, interpreter: Optional[str], req_file: str, cwd: str,
+        env: Optional[dict], last_result: CommandResult,
+    ) -> CommandResult:
+        """Install a requirements file, dropping packages that can't be built/found.
+
+        Iteratively: find the package pip failed on, remove it, reinstall the rest.
+        Lets a heavy ML repo install 13/14 deps instead of 0 when one package
+        (flash_attn, deepspeed, …) can't compile on this machine.
+        """
+        req_path = Path(req_file)
+        if not req_path.is_absolute():
+            req_path = Path(cwd) / req_file
+        try:
+            lines = req_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return last_result
+
+        active = [i for i, line in enumerate(lines) if self._requirement_name(line) is not None]
+        if not active:
+            return last_result
+
+        pip_base = [interpreter, "-m", "pip"] if interpreter else ["pip"]
+        result = last_result
+        skipped: List[str] = []
+
+        for _ in range(len(active) + 1):
+            bad = self._failing_package(result.stdout, lines, active)
+            if bad is None:
+                break  # can't pinpoint a culprit to drop — leave it to the LLM
+            name = self._requirement_name(lines[bad]) or lines[bad].strip()
+            skipped.append(name)
+            active = [i for i in active if i != bad]
+            console.print(
+                f"  [warning]Couldn't install '{name}' — skipping it and installing the rest…[/warning]"
+            )
+            if not active:
+                break
+            tmp = Path(tempfile.gettempdir()) / f"devready-req-{os.getpid()}.txt"
+            tmp.write_text("\n".join(lines[i] for i in active) + "\n", encoding="utf-8")
+            result = run_command_teed(pip_base + ["install", "-r", str(tmp)], cwd=cwd, env=env)
+            if result.ok:
+                break
+
+        if skipped and result.ok:
+            console.print(
+                f"  [success]Installed all dependencies except: {', '.join(skipped)}.[/success]\n"
+                f"  [muted]Those usually need a GPU/compiler and are optional — the project "
+                f"should still run; install them manually if you need them.[/muted]"
+            )
         return result
 
     # -- built-in (offline) retries ------------------------------------------
@@ -168,8 +285,14 @@ class InstallHealer:
         last: CommandResult,
         description: str,
         env: Optional[dict] = None,
+        interpreter: Optional[str] = None,
     ) -> CommandResult:
-        """Ask the LLM for fixes and retry, up to MAX_HEAL_ATTEMPTS times."""
+        """Ask the LLM for fixes and retry, up to MAX_HEAL_ATTEMPTS times.
+
+        ``interpreter`` is the project's venv python (when known) so a suggested
+        ``pip install …`` / ``python …`` fix runs INSIDE the project's
+        environment, not a global one.
+        """
         from .client import ask_llm_json
 
         current = command
@@ -199,7 +322,7 @@ class InstallHealer:
             if not actions:
                 break
 
-            replacement = self._apply_actions(actions, cwd, env)
+            replacement = self._apply_actions(actions, cwd, env, interpreter)
             if replacement:
                 current = replacement
 
@@ -263,14 +386,40 @@ class InstallHealer:
                     console.print(f"  [muted]Skipping an unsafe suggested command: {cmd}[/muted]")
         return actions
 
+    @staticmethod
+    def _venv_rewrite(cmd_str: str, interpreter: Optional[str]) -> Optional[List[str]]:
+        """Rewrite a bare ``pip``/``python`` fix to use the project's interpreter.
+
+        The AI often suggests ``pip install X`` — but bare ``pip`` is the GLOBAL
+        one, so the fix lands in the wrong environment and does nothing. When we
+        know the venv interpreter, route it there. Returns the argv list, or None
+        when there's nothing to rewrite (run the command as given).
+        """
+        if not interpreter:
+            return None
+        parts = cmd_str.split()
+        if not parts:
+            return None
+        head = Path(parts[0]).name.lower()
+        for suffix in (".exe", ".cmd", ".bat"):
+            if head.endswith(suffix):
+                head = head[: -len(suffix)]
+        if head in ("pip", "pip3"):
+            return [interpreter, "-m", "pip"] + parts[1:]
+        if head in ("python", "python3", "py"):
+            return [interpreter] + parts[1:]
+        return None
+
     def _apply_actions(
-        self, actions: List[FixAction], cwd: str, env: Optional[dict] = None
+        self, actions: List[FixAction], cwd: str, env: Optional[dict] = None,
+        interpreter: Optional[str] = None,
     ) -> Optional[List[str]]:
         """Apply each fix. Returns a replacement install command, if one was given.
 
         ``env`` is forwarded so a ``run`` fix uses the same (possibly pinned)
-        toolchain as the install it's repairing — otherwise a fix could run on
-        the wrong Node/Python and reintroduce the very error it's meant to cure.
+        toolchain as the install it's repairing. ``interpreter`` (the venv python)
+        ensures ``pip``/``python`` fixes run INSIDE the project's environment, not
+        a global one — without this, every AI fix silently targets the wrong env.
         """
         from ..environment import system_deps
 
@@ -290,11 +439,16 @@ class InstallHealer:
                 if env is not None:
                     env[action.name] = action.value
             elif action.type == "run":
-                console.print(f"  [info]Running fix: {action.command}[/info]")
-                run_command_teed(action.command, cwd=cwd, shell=True, env=env)
+                rewritten = self._venv_rewrite(action.command, interpreter)
+                if rewritten:
+                    console.print(f"  [info]Running fix (in the project's env): {' '.join(rewritten)}[/info]")
+                    run_command_teed(rewritten, cwd=cwd, env=env)
+                else:
+                    console.print(f"  [info]Running fix: {action.command}[/info]")
+                    run_command_teed(action.command, cwd=cwd, shell=True, env=env)
             elif action.type == "replace_install":
                 console.print(f"  [info]Adjusting the install command: {action.command}[/info]")
-                replacement = action.command.split()
+                replacement = self._venv_rewrite(action.command, interpreter) or action.command.split()
         return replacement
 
 
