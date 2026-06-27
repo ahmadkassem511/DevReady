@@ -214,6 +214,11 @@ class Engine:
             console.print("  Use [bold]devready stop[/bold] first if you want to restart it.")
             return
 
+        # Bring up the project's backing services (Docker compose / DB containers)
+        # before relaunching — so "Run" after installing Docker does the full
+        # setup, not just the web command.
+        self._bring_up_services()
+
         # Relaunch the components saved by the last `start`.
         if saved:
             targets = [
@@ -504,43 +509,53 @@ class Engine:
     # -- Step 6: Services (databases / caches / docker-compose) --------------
     def _step_docker(self) -> None:
         print_step(6, TOTAL_STEPS, "Services")
+        self._bring_up_services(announce_none=True)
+
+    def _bring_up_services(self, announce_none: bool = False) -> None:
+        """Bring up the project's backing services via the container engine.
+
+        Used by both ``start`` (step 6) and ``run`` (relaunch), so installing
+        Docker and clicking Run does the FULL setup. Proceeds automatically (no
+        prompt) — bringing up a project's own compose stack / standard DB
+        containers is the expected job of a setup tool. Quiet when nothing's
+        needed.
+        """
         compose = self._find_compose_file()
         # Backing services the app needs (Postgres/Redis/MySQL/Mongo), inferred
         # from its dependency + env files. A compose file usually defines its own.
         needed = [] if compose is not None else services.detect_services(self.project_dir)
 
         if compose is None and not needed:
-            console.print("  [muted]No services needed — skipping.[/muted]")
+            if announce_none:
+                console.print("  [muted]No services needed — skipping.[/muted]")
             return
 
-        # A container engine is now a real dependency — ensure one (Docker if
-        # present, else Podman, no admin). Cached so the launch step won't retry.
+        # Ensure a container engine (Docker if present, else Podman). Cached so it
+        # isn't retried in the launch step.
         runtime, _ = self._ensure_runtime()
         if not runtime:
             return  # ensure_container_runtime already explained what's needed
         svc_env = self._launch_env()  # carries the engine's PATH (e.g. podman shim)
 
         if compose is not None:
-            if self._confirm(f"  Start services from {compose.name}? [Y/n] "):
-                console.print("  Starting services (docker compose up -d)…")
-                result = run_command(
-                    ["docker", "compose", "up", "-d"],
-                    cwd=str(self.project_dir), capture=False, env=svc_env,
-                )
-                if result.ok:
-                    console.print("  [success]Services started.[/success]")
-                    self._write_state(docker=True)
-                else:
-                    console.print("  [error]Failed to start services.[/error]")
+            console.print(f"  Starting services from {compose.name} (docker compose up -d)…")
+            result = run_command(
+                ["docker", "compose", "up", "-d"],
+                cwd=str(self.project_dir), capture=False, env=svc_env,
+            )
+            if result.ok:
+                console.print("  [success]Services started.[/success]")
+                self._write_state(docker=True)
+            else:
+                console.print("  [error]Failed to start services.[/error]")
             return
 
         # No compose file, but the project talks to a database/cache — provision
         # standard containers for it so the app can actually run.
         console.print(f"  This project needs: [bold]{', '.join(needed)}[/bold]. Bringing them up…")
-        if self._confirm(f"  Start {', '.join(needed)} via the container engine? [Y/n] "):
-            started = services.ensure_services(needed, env=svc_env)
-            if started:
-                self._write_state(service_containers=started)
+        started = services.ensure_services(needed, env=svc_env)
+        if started:
+            self._write_state(service_containers=started)
 
     def _find_compose_file(self) -> Optional[Path]:
         for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):

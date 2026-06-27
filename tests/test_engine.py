@@ -57,6 +57,40 @@ def test_requirements_report_includes_detected_services(tmp_path):
     assert "postgres" in [r["name"] for r in report]
 
 
+def test_run_brings_up_services_on_relaunch(tmp_path, monkeypatch):
+    # The "Run" path must bring up Docker services too (not just the web command),
+    # so installing Docker then clicking Run does the full setup.
+    import devready.engine as engine_mod
+
+    eng = Engine(project_dir=tmp_path)
+    called = {"services": False}
+    monkeypatch.setattr(eng, "_bring_up_services", lambda *a, **k: called.__setitem__("services", True))
+    monkeypatch.setattr(engine_mod, "detect_stack", lambda p: [])
+    monkeypatch.setattr(eng, "_collect_launch_targets", lambda: [])
+    monkeypatch.setattr(eng, "_no_server_help", lambda: None)
+
+    eng.run()
+    assert called["services"] is True
+
+
+def test_bring_up_services_runs_compose(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    from devready.utils import CommandResult
+
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n")
+    eng = Engine(project_dir=tmp_path)
+    monkeypatch.setattr(eng, "_ensure_runtime", lambda: ("docker", None))
+    monkeypatch.setattr(eng, "_launch_env", lambda: None)
+    ran = []
+    monkeypatch.setattr(
+        engine_mod, "run_command",
+        lambda cmd, **k: ran.append(cmd) or CommandResult(command="x", returncode=0),
+    )
+
+    eng._bring_up_services()
+    assert any("compose" in c and "up" in c for c in ran)
+
+
 def test_migration_env_loads_project_dotenv(tmp_path, monkeypatch):
     # Migration tools read DATABASE_URL from the env — DevReady must load the
     # project's .env into the migration subprocess (without clobbering PATH).
