@@ -202,6 +202,33 @@ def test_api_rejects_foreign_origin(client):
     assert resp.status_code == 403
 
 
+def test_install_docker_endpoint_opens_page_when_no_pkg_manager(client, monkeypatch):
+    # Force the "open download page" path so the test never launches a real install.
+    import devready.web.server as srv
+
+    monkeypatch.setattr(srv.shutil, "which", lambda n: None)
+    opened = {}
+    monkeypatch.setattr(srv.webbrowser, "open", lambda u: opened.setdefault("url", u))
+
+    resp = client.post("/api/install-docker", headers={"X-DevReady-Token": "testtoken"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "open"
+    assert "docker.com" in body["url"]
+    assert opened["url"].startswith("https://")
+
+
+def test_jobs_reads_needs_docker_flag(tmp_path):
+    from devready.web.jobs import JobManager
+
+    proj = tmp_path / "proj"
+    (proj / ".devready").mkdir(parents=True)
+    (proj / ".devready" / "state.json").write_text('{"needs_container_engine": true}')
+    mgr = JobManager()
+    assert mgr._read_needs_docker(proj) is True
+    assert mgr._read_needs_docker(tmp_path / "missing") is False
+
+
 def test_catalog_endpoint(client):
     resp = client.get("/api/catalog?category=ai", headers={"X-DevReady-Token": "testtoken"})
     assert resp.status_code == 200

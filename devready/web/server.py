@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import json
 import queue
+import shutil
+import subprocess
+import sys
 import webbrowser
 from pathlib import Path
 from typing import Optional
@@ -241,6 +244,53 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
             raise HTTPException(status_code=400, detail=str(exc))
         return {"job_id": job.id, "name": job.name, "known": catalog.is_known_repo(repo_url)}
 
+    @app.post("/api/install-docker")
+    def install_docker():
+        """Kick off a Docker Desktop install (one UAC click) or open its download.
+
+        On Windows with winget we launch the install in a new console so the user
+        sees progress and approves the elevation prompt; otherwise we open the
+        download page. Either way Docker needs a one-time restart, so we tell the
+        user to restart and click Run again.
+        """
+        url = "https://www.docker.com/products/docker-desktop"
+        if sys.platform == "win32" and shutil.which("winget"):
+            try:
+                subprocess.Popen(
+                    ["winget", "install", "-e", "--id", "Docker.DockerDesktop",
+                     "--accept-package-agreements", "--accept-source-agreements"],
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                )
+                return {
+                    "status": "installing",
+                    "message": "Installing Docker Desktop in a new window — approve the Windows "
+                               "prompt. When it finishes, RESTART your PC, then click Run again.",
+                }
+            except OSError:
+                pass
+        elif sys.platform == "darwin" and shutil.which("brew"):
+            try:
+                subprocess.Popen(
+                    ["brew", "install", "--cask", "docker"],
+                    creationflags=0,
+                )
+                return {
+                    "status": "installing",
+                    "message": "Installing Docker Desktop via Homebrew — then open Docker once "
+                               "and click Run again.",
+                }
+            except OSError:
+                pass
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        return {
+            "status": "open",
+            "url": url,
+            "message": "Opened the Docker Desktop download page. Install it, restart, then click Run again.",
+        }
+
     @app.get("/api/jobs/{job_id}/stream")
     def job_stream(job_id: str):
         job = app.state.jobs.get(job_id)
@@ -260,6 +310,7 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
                         "status": job.status,
                         "project_dir": job.project_dir,
                         "urls": job.urls,
+                        "needs_docker": job.needs_docker,
                     }
                     yield f"data: {json.dumps(payload)}\n\n"
                     break

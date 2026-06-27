@@ -77,9 +77,12 @@ class Engine:
         """
         if self._container_runtime is None:
             self._container_runtime = system_deps.ensure_container_runtime()
-            _, path_prefix = self._container_runtime
+            name, path_prefix = self._container_runtime
             if path_prefix:
                 self._extra_path = path_prefix
+            # Record whether a *needed* engine was unavailable, so the GUI can
+            # offer a one-click "Install Docker Desktop".
+            self._write_state(needs_container_engine=(name is None))
         return self._container_runtime
 
     def _make_healer(self, project_dir: Path):

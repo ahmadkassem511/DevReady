@@ -372,6 +372,18 @@
           } else {
             statusEl.textContent = "✗ Failed — see the log above.";
           }
+          // Offer a one-click Docker install when the project needs a container
+          // engine that isn't available.
+          if (msg.needs_docker) {
+            const dnote = document.createElement("span");
+            dnote.className = "muted note";
+            dnote.textContent = "🐳 Needs Docker for its backend services.";
+            actions.appendChild(dnote);
+            const dbtn = document.createElement("button");
+            dbtn.className = "btn"; dbtn.textContent = "Install Docker Desktop";
+            dbtn.onclick = () => installDocker(dbtn);
+            actions.appendChild(dbtn);
+          }
           const close = document.createElement("button");
           close.className = "btn secondary"; close.textContent = "Close";
           close.onclick = () => { closeOverlay(); loadLibrary(); };
@@ -379,6 +391,19 @@
         }
       };
       es.onerror = () => { es.close(); statusEl.textContent = "Connection lost."; };
+    }
+
+    // Kick off a Docker Desktop install (one approval) or open its download page.
+    async function installDocker(btn) {
+      if (btn) { btn.disabled = true; btn.textContent = "Starting Docker install…"; }
+      try {
+        const r = await api("/api/install-docker", { method: "POST" });
+        if (r.url) window.open(r.url, "_blank");
+        alert(r.message || "Starting Docker install…");
+      } catch (e) {
+        alert("✗ " + e);
+      }
+      if (btn) { btn.disabled = false; btn.textContent = "Install Docker Desktop"; }
     }
 
     // --- install ---

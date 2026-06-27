@@ -79,6 +79,7 @@ class Job:
     status: str = "running"  # running | success | error
     project_dir: Optional[str] = None
     urls: List[str] = field(default_factory=list)
+    needs_docker: bool = False  # project needs a container engine that's unavailable
     queue: "queue.Queue" = field(default_factory=queue.Queue)
 
 
@@ -124,6 +125,7 @@ class JobManager:
                 job.urls = self._read_urls(Path(job.project_dir))
             else:
                 job.status = "error"
+            job.needs_docker = self._read_needs_docker(Path(job.project_dir))
         except Exception as exc:
             job.status = "error"
             self._emit(job, f"✗ Unexpected error: {exc}")
@@ -168,6 +170,7 @@ class JobManager:
                 job.urls = self._read_urls(target)
             else:
                 job.status = "error"
+            job.needs_docker = self._read_needs_docker(target)
         except Exception as exc:  # never let a job thread die silently
             job.status = "error"
             self._emit(job, f"✗ Unexpected error: {exc}")
@@ -205,3 +208,12 @@ class JobManager:
         return [
             f"http://localhost:{p['port']}" for p in processes if p.get("port")
         ]
+
+    def _read_needs_docker(self, project_dir: Path) -> bool:
+        """True if setup flagged that a needed container engine was unavailable."""
+        from ..engine import Engine
+
+        try:
+            return bool(Engine(project_dir=project_dir)._read_state().get("needs_container_engine"))
+        except Exception:
+            return False
