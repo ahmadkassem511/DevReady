@@ -10,11 +10,13 @@ Keeping these in one place means the rest of the codebase can stay focused on
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Sequence
 
 from rich.console import Console
@@ -76,6 +78,42 @@ class CommandResult:
         return self.returncode == 0
 
 
+def git_bash() -> Optional[str]:
+    """Locate a *real* Git Bash, never ``C:\\Windows\\System32\\bash.exe``.
+
+    System32's ``bash.exe`` is the WSL launcher; on a machine with no WSL distro
+    it dies with ``execvpe(/bin/bash) failed`` / ``HCS_E_SERVICE_NOT_AVAILABLE``.
+    Since System32 is usually early on PATH, a bare ``which("bash")`` finds that
+    stub — so we resolve Git Bash from git's own location / standard install dirs.
+    On non-Windows, ``bash`` on PATH is correct.
+    """
+    if sys.platform != "win32":
+        return shutil.which("bash")
+    candidate = shutil.which("bash")
+    if candidate and "system32" not in candidate.lower():
+        return candidate
+    roots: list = []
+    git = shutil.which("git")
+    if git:
+        p = Path(git).resolve()
+        roots += [p.parent.parent, p.parent.parent.parent]  # …/Git/cmd|mingw64/bin/git.exe → …/Git
+    roots += [
+        Path(r"C:\Program Files\Git"),
+        Path(r"C:\Program Files (x86)\Git"),
+        Path(os.path.expanduser(r"~\AppData\Local\Programs\Git")),
+        Path(os.path.expanduser(r"~\scoop\apps\git\current")),
+    ]
+    for root in roots:
+        for rel in ("bin/bash.exe", "usr/bin/bash.exe"):
+            bash = root / rel
+            try:
+                if bash.exists():
+                    return str(bash)
+            except OSError:
+                continue
+    return None
+
+
 def _resolve_windows_executable(
     command: Sequence[str] | str, path: Optional[str] = None
 ) -> Sequence[str] | str:
@@ -88,11 +126,19 @@ def _resolve_windows_executable(
     Resolving the real path (which honours PATHEXT and finds ``npm.cmd``) makes
     these run correctly. Harmless for ``.exe`` targets and for absolute paths.
 
+    ``bash``/``sh`` are special-cased to a real Git Bash (never the System32 WSL
+    stub), so a project's ``setup.sh`` and any shell command run correctly.
+
     ``path`` overrides which PATH to search — used when running a tool from a
     specific runtime (e.g. an fnm-managed Node's bin dir) that isn't the default.
     """
     if sys.platform != "win32" or isinstance(command, str) or not command:
         return command
+    base = command[0].lower().replace("\\", "/").split("/")[-1]
+    if base in ("bash", "bash.exe", "sh", "sh.exe"):
+        gb = git_bash()
+        if gb:
+            return [gb, *command[1:]]
     resolved = shutil.which(command[0], path=path)
     return [resolved, *command[1:]] if resolved else command
 

@@ -95,6 +95,19 @@ def test_non_windows_executable_resolution_is_noop(monkeypatch):
     assert utils._resolve_windows_executable(["npm", "install"]) == ["npm", "install"]
 
 
+def test_bash_resolves_to_git_bash_not_wsl_stub(monkeypatch):
+    # ROOT FIX: `bash scripts/setup.sh` must run Git Bash, not the System32 WSL
+    # launcher (which dies with execvpe(/bin/bash) when no distro is installed).
+    import devready.utils as utils
+
+    monkeypatch.setattr(utils.sys, "platform", "win32")
+    monkeypatch.setattr(utils, "git_bash", lambda: r"C:\Program Files\Git\bin\bash.exe")
+    assert utils._resolve_windows_executable(["bash", "scripts/setup.sh"]) == [
+        r"C:\Program Files\Git\bin\bash.exe", "scripts/setup.sh"
+    ]
+    assert utils._resolve_windows_executable(["sh", "-c", "x"])[0] == r"C:\Program Files\Git\bin\bash.exe"
+
+
 def test_node_has_tool_mappings():
     # Node must be auto-installable across the common managers (it bundles npm).
     from devready.environment.system_deps import TOOL_PACKAGES

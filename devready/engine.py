@@ -486,16 +486,19 @@ class Engine:
 
         console.print(f"  Running [bold]{strategy.display}[/bold]…")
         result = run_command(strategy.command, cwd=str(self.project_dir), capture=False)
-        self._install_ok = result.ok
-        self._project_setup_ran = result.ok
         if result.ok:
+            self._project_setup_ran = True
             console.print(f"  [success]Project setup completed via {strategy.display}.[/success]")
-        else:
-            console.print(
-                f"  [error]{strategy.display} failed (exit {result.returncode}).[/error] "
-                f"You can run it manually to see the full output."
-            )
-        return True
+            return True
+
+        # The project's own setup failed — DON'T abort. It's often optional or
+        # Unix-specific; fall back to DevReady's reliable native install so the
+        # dependencies still land and the app can run.
+        console.print(
+            f"  [warning]{strategy.display} didn't complete (exit {result.returncode}) — "
+            f"falling back to DevReady's standard dependency install.[/warning]"
+        )
+        return False
 
     # -- Step 5: Environment variables ---------------------------------------
     def _step_env_vars(self) -> None:

@@ -57,6 +57,45 @@ def test_requirements_report_includes_detected_services(tmp_path):
     assert "postgres" in [r["name"] for r in report]
 
 
+def test_project_setup_failure_falls_back_to_native(tmp_path, monkeypatch):
+    # ROOT FIX: a failing project setup script (e.g. bash setup.sh) must NOT abort
+    # the install — _try_project_setup returns False so native install runs, and
+    # it doesn't mark the run failed.
+    import devready.engine as engine_mod
+    from devready.environment import strategies
+    from devready.utils import CommandResult
+
+    eng = Engine(project_dir=tmp_path)
+    eng.assume_yes = True
+    monkeypatch.setattr(
+        strategies, "detect_setup_strategies",
+        lambda p: [strategies.SetupStrategy("script", ["bash", "setup.sh"], "bash setup.sh", "bash")],
+    )
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
+    monkeypatch.setattr(engine_mod, "run_command", lambda *a, **k: CommandResult("bash setup.sh", 1))
+
+    assert eng._try_project_setup() is False     # falls through to native setup
+    assert eng._install_ok is True               # the script's failure didn't abort the run
+
+
+def test_project_setup_success_returns_true(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    from devready.environment import strategies
+    from devready.utils import CommandResult
+
+    eng = Engine(project_dir=tmp_path)
+    eng.assume_yes = True
+    monkeypatch.setattr(
+        strategies, "detect_setup_strategies",
+        lambda p: [strategies.SetupStrategy("makefile", ["make", "setup"], "make setup", "make")],
+    )
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: True)
+    monkeypatch.setattr(engine_mod, "run_command", lambda *a, **k: CommandResult("make setup", 0))
+
+    assert eng._try_project_setup() is True
+    assert eng._project_setup_ran is True
+
+
 def test_run_brings_up_services_on_relaunch(tmp_path, monkeypatch):
     # The "Run" path must bring up Docker services too (not just the web command),
     # so installing Docker then clicking Run does the full setup.
