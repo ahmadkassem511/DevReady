@@ -53,6 +53,19 @@ class SystemRequirements:
     notes: str = ""
     source: str = "none"    # "llm", "regex", or "none"
 
+    @property
+    def has_any(self) -> bool:
+        return bool(
+            self.os_names
+            or self.ram_min_gb is not None
+            or self.disk_min_gb is not None
+            or self.cpu_min_cores is not None
+            or self.cpu_arch is not None
+            or self.gpu_required
+            or self.gpu_cuda_required
+            or self.gpu_vram_min_gb is not None
+        )
+
 
 _CHECK_RESULT_FIELDS = ["name", "status", "current", "required", "message"]
 
@@ -330,13 +343,16 @@ def extract_requirements(
     ``config`` is needed for the LLM path (``Config`` from ``devready.config``).
     ``detections`` is a ``List[DetectionResult]`` with language/framework info.
     """
-    llm_result: Optional[dict] = None
+    # Try LLM first. If it returns something concrete, use it; otherwise fall
+    # through to the regex fallback (the LLM may be rate-limited or return an
+    # empty result when the README actually has requirements the regex can catch).
     if config is not None and config.llm.is_configured and readme_text.strip():
         llm_result = _extract_llm(readme_text, config, detections)
         if llm_result is not None:
             req = _dict_to_requirements(llm_result)
-            req.source = "llm"
-            return req
+            if req.has_any:
+                req.source = "llm"
+                return req
 
     regex_result = _extract_regex(readme_text)
     if regex_result is not None:
@@ -392,18 +408,22 @@ def _extract_regex(readme_text: str) -> Optional[SystemRequirements]:
     if found_oses:
         req.os_names = sorted(found_oses)
 
-    # RAM
+    # RAM — try keyword-prefixed first ("requires 8 GB RAM"), then bare ("8 GB RAM")
     ram_match = re.search(
         r"(?:minimum|requires?|recommends?|needs?)\s*(?:at\s+least\s+)?"
         r"(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?(?:ram|memory)",
         text,
     )
+    if not ram_match:
+        ram_match = re.search(
+            r"(?:^|\s)(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?(?:ram|memory)"
+            r"(?:\s+(?:or\s+)?more)?",
+            text,
+        )
+    if not ram_match:
+        ram_match = re.search(r"(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?(?:ram|memory)\s+(?:or\s+)?more", text)
     if ram_match:
         req.ram_min_gb = float(ram_match.group(1))
-    else:
-        ram_match = re.search(r"(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?(?:ram|memory)\s+(?:or\s+)?more", text)
-        if ram_match:
-            req.ram_min_gb = float(ram_match.group(1))
 
     # Disk
     disk_match = re.search(
@@ -441,6 +461,10 @@ def _extract_regex(readme_text: str) -> Optional[SystemRequirements]:
         r"(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?vram",
         text,
     )
+    if not vram_match:
+        vram_match = re.search(
+            r"(?:^|\s)(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?vram", text,
+        )
     if vram_match:
         req.gpu_vram_min_gb = float(vram_match.group(1))
 
@@ -453,18 +477,7 @@ def _extract_regex(readme_text: str) -> Optional[SystemRequirements]:
     if notes:
         req.notes = "; ".join(notes[:3])
 
-    # Did we find anything useful?
-    has_any = (
-        bool(req.os_names)
-        or req.ram_min_gb is not None
-        or req.disk_min_gb is not None
-        or req.cpu_min_cores is not None
-        or req.cpu_arch is not None
-        or req.gpu_required
-        or req.gpu_cuda_required
-        or req.gpu_vram_min_gb is not None
-    )
-    if not has_any:
+    if not req.has_any:
         return None
     return req
 
