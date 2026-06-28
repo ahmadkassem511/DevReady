@@ -569,8 +569,8 @@ class Engine:
 
         if compose is not None:
             console.print(f"  Starting services from {compose.name} (docker compose up -d)…")
-            # Validate compose config before running — catches "no service selected"
-            # and missing-variable errors early with a clear message.
+            # Validate compose config before running — catches missing-variable errors
+            # early with a clear message.
             validate = run_command(
                 ["docker", "compose", "config", "--no-interpolate"],
                 cwd=str(self.project_dir), capture=True, env=svc_env,
@@ -580,11 +580,6 @@ class Engine:
                 console.print(f"  [warning]Docker Compose configuration has issues:[/warning]")
                 for line in stderr.strip().splitlines()[-8:]:
                     console.print(f"  [muted]{line}[/muted]")
-                if "no service selected" in stderr.lower():
-                    console.print(
-                        "  [warning]The compose file defines no services — variables may "
-                        "resolve to empty strings. Check your .env for required values.[/warning]"
-                    )
                 console.print("  [muted]Attempting to start anyway…[/muted]")
             else:
                 console.print("  [muted]Compose configuration validated.[/muted]")
@@ -600,8 +595,25 @@ class Engine:
             if result.ok:
                 console.print("  [success]Services started.[/success]")
                 self._write_state(docker=True)
-            else:
-                console.print("  [error]Failed to start services.[/error]")
+                return
+            # Retry with explicit profile when "no service selected" — the compose
+            # file uses Docker Compose profiles and all services are behind one.
+            if result.returncode != 0 and "no service selected" in (result.stderr or "").lower():
+                profile = self._detect_compose_profiles(compose)
+                if profile:
+                    console.print(
+                        f"  [info]All services use profiles — retrying with --profile {profile}[/info]"
+                    )
+                    profile_cmd = compose_cmd + ["--profile", profile]
+                    result = run_command(
+                        profile_cmd,
+                        cwd=str(self.project_dir), capture=False, env=svc_env,
+                    )
+                    if result.ok:
+                        console.print("  [success]Services started.[/success]")
+                        self._write_state(docker=True)
+                        return
+            console.print("  [error]Failed to start services.[/error]")
             return
 
         # No compose file, but the project talks to a database/cache — provision
@@ -610,6 +622,30 @@ class Engine:
         started = services.ensure_services(needed, env=svc_env)
         if started:
             self._write_state(service_containers=started)
+
+    @staticmethod
+    def _detect_compose_profiles(compose_path: Path) -> Optional[str]:
+        """Return the first profile found in a compose file, or None.
+
+        Docker Compose won't start any service when every service has a
+        ``profiles:`` key and no ``--profile`` is passed. We auto-select the
+        first profile so the user gets running containers instead of a silent
+        "no service selected".
+        """
+        try:
+            text = compose_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        # Look for `profiles: [ "name" ]` or `profiles: ["name"]` patterns
+        # under the `services:` block (naive YAML-lite — enough for this check).
+        m = re.search(r"^\s+profiles:\s*\[\s*[\"']([^\"']+)[\"']", text, re.MULTILINE)
+        if m:
+            return m.group(1)
+        # Also handle multi-line form: ``  profiles:\n    - name``
+        m = re.search(r"^\s+profiles:\s*\n\s+-\s+([\w-]+)", text, re.MULTILINE)
+        if m:
+            return m.group(1)
+        return None
 
     def _find_compose_file(self) -> Optional[Path]:
         for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
@@ -952,13 +988,16 @@ class Engine:
                 url = f"http://localhost:{port}"
                 served.append(url)
                 # Check HTTP response content — not just that the port is open
-                page_warn = self._check_response_body(url)
+                page_warn = self._check_response_body(url, log_path)
                 if page_warn:
                     console.print(f"  [warning]• {name} started on {url}, but: {page_warn}[/warning]")
-                    build_err = self._scan_build_error(log_path)
-                    if build_err:
-                        console.print(f"  [warning]Server log shows: {build_err}[/warning]")
-                    console.print("  [muted]Check the log or your .env configuration and re-run.[/muted]")
+                    # Don't rescan the log for build errors if we already gave a
+                    # compilation-in-progress hint — they're redundant.
+                    if "compiling" not in page_warn:
+                        build_err = self._scan_build_error(log_path)
+                        if build_err:
+                            console.print(f"  [warning]Server log shows: {build_err}[/warning]")
+                        console.print("  [muted]Check the log or your .env configuration and re-run.[/muted]")
                 else:
                     console.print(f"  [success]✓ {name} → {url}[/success]")
                     # The server bound its port, but its own code may still have a
@@ -1022,10 +1061,14 @@ class Engine:
         return None
 
     @staticmethod
-    def _check_response_body(url: str) -> Optional[str]:
-        """GET the URL and return a warning if the page seems broken/blank, else None."""
+    def _check_response_body(url: str, log_path: Optional[Path] = None) -> Optional[str]:
+        """GET the URL and return a warning if the page seems broken/blank, else None.
+
+        When the request fails, also checks the server log for clues like pending
+        compilation (Next.js dev servers can take 30+ seconds on cold start).
+        """
         try:
-            resp = httpx.get(url, timeout=5.0, headers={"User-Agent": "DevReady/1.0"})
+            resp = httpx.get(url, timeout=30.0, headers={"User-Agent": "DevReady/1.0"})
             body = resp.text.strip()
             if resp.status_code >= 400:
                 return f"HTTP {resp.status_code} — the server returned an error"
@@ -1040,6 +1083,17 @@ class Engine:
                 return "The page reports an application error — check your .env configuration"
             return None
         except httpx.RequestError as exc:
+            # Check server log for compilation-in-progress hints
+            if log_path is not None:
+                try:
+                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                    if "compiling" in log_text.lower():
+                        return (
+                            "The development server is still compiling — this can take a minute\n"
+                            "  on first start. The page will load once compilation finishes."
+                        )
+                except OSError:
+                    pass
             return f"Could not verify the page: {exc}"
         except Exception:
             return None
