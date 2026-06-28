@@ -145,7 +145,36 @@ class JobManager:
             target = workspace / job.name
 
             if target.exists():
-                self._emit(job, f"→ Project already cloned at {target}; reusing it.")
+                # Verify the folder contains real project files, not just empty
+                # leftovers from a failed rmtree (common on Windows).
+                has_project_files = any(target.iterdir()) and (
+                    (target / "package.json").exists()
+                    or (target / "requirements.txt").exists()
+                    or (target / "pyproject.toml").exists()
+                    or (target / "Cargo.toml").exists()
+                    or (target / "go.mod").exists()
+                    or (target / "Gemfile").exists()
+                    or (target / "composer.json").exists()
+                    or (target / "pom.xml").exists()
+                    or (target / "Program.cs").exists()
+                )
+                if not has_project_files:
+                    self._emit(
+                        job,
+                        f"→ {target} exists but has no recognizable project files — re-cloning.",
+                    )
+                    import shutil
+                    shutil.rmtree(target, ignore_errors=True)
+                    self._emit(job, f"→ Cloning {job.repo_url} …")
+                    code = self._stream(
+                        ["git", "clone", "--depth", "1", job.repo_url, str(target)], job
+                    )
+                    if code != 0:
+                        job.status = "error"
+                        self._emit(job, "✗ Clone failed. Check the URL and your connection.")
+                        return
+                else:
+                    self._emit(job, f"→ Project already cloned at {target}; reusing it.")
             else:
                 self._emit(job, f"→ Cloning {job.repo_url} …")
                 code = self._stream(
