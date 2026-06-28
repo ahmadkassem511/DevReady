@@ -38,6 +38,45 @@ from .jobs import _DONE, JobManager
 _STATIC_DIR = Path(__file__).with_name("static")
 
 
+def _run_check(repo_url: str):
+    """Clone a repo, detect its stack, read its README, and check hardware.
+
+    Runs in a thread (via ``asyncio.to_thread``) so the async endpoint doesn't
+    block. The cloned directory is always cleaned up before returning.
+
+    Returns a ``system_check.CompatibilityReport`` or raises ``HTTPException``.
+    """
+    import tempfile
+
+    from ..environment import system_check
+    from ..engine import Engine as _Engine
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        target = tmp / "repo"
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", repo_url, str(target)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "Clone failed").strip()
+            raise HTTPException(status_code=400, detail=detail)
+
+        config = Config.load()
+        engine = _Engine(project_dir=target, config=config, assume_yes=True)
+        engine._step_detect()
+        engine._step_analyze_readme()
+
+        readme = engine._find_readme()
+        readme_text = readme.read_text(encoding="utf-8") if readme else ""
+        hw = system_check.get_hardware_info(target)
+        req = system_check.extract_requirements(readme_text, config, engine.detections)
+        report = system_check.check_compatibility(hw, req)
+        return report
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = None) -> FastAPI:
     """Build and return the FastAPI app.
 
@@ -255,6 +294,37 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
 
         unregister_project(target)
         return {"ok": True}
+
+    # -- API: compatibility check (before install) -------------------------
+    @app.post("/api/check-compatibility")
+    async def check_compatibility(request: Request):
+        """Clone the repo, detect stack, analyse README, and check hardware.
+
+        Returns a JSON report so the GUI can show results and offer a
+        "Continue Anyway" fallback when the user's system doesn't match
+        the project's requirements.
+        """
+        import asyncio
+        from dataclasses import asdict
+
+        body = await request.json()
+        repo_url = (body.get("repo_url") or "").strip()
+        if not repo_url:
+            raise HTTPException(status_code=400, detail="repo_url is required")
+
+        # Run the heavy work in a thread so the async event loop stays responsive.
+        report = await asyncio.to_thread(_run_check, repo_url)
+
+        def _check_to_dict(c):
+            return {f: getattr(c, f) for f in ("name", "status", "current", "required", "message")}
+
+        return {
+            "compatible": report.compatible,
+            "has_errors": report.has_errors,
+            "checks": [_check_to_dict(c) for c in report.checks],
+            "hw": asdict(report.hw) if report.hw else None,
+            "req": asdict(report.req) if report.req else None,
+        }
 
     # -- API: install (start a job + stream its log) ----------------------
     @app.post("/api/install")

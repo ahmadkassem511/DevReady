@@ -200,8 +200,10 @@
           This will: clone the project, install everything it needs (isolated to this app),
           and start it. Nothing else on your computer is changed.
         </div>
+        <div id="d-check-result"></div>
         <div class="row">
           <button class="btn" id="d-install">Install</button>
+          <button class="btn secondary" id="d-check-hw">Check Hardware</button>
           <button class="btn secondary" id="d-explain">✨ Explain simply</button>
           <button class="btn secondary" onclick="closeOverlay()">Cancel</button>
         </div>
@@ -312,7 +314,17 @@
       document.getElementById("d-name").textContent = p.name;
       document.getElementById("d-lang").textContent = (p.language || "") + stars;
       document.getElementById("d-desc").textContent = p.description || "No description provided.";
-      document.getElementById("d-install").onclick = () => startInstall(p.repo);
+
+      // Reset hardware check state
+      document.getElementById("d-check-result").innerHTML = "";
+      document.getElementById("d-check-result").classList.remove("warn", "hidden");
+      const inst = document.getElementById("d-install");
+      inst.textContent = "Install"; inst.disabled = false; inst.onclick = () => startInstall(p.repo);
+      const hw = document.getElementById("d-check-hw");
+      hw.textContent = "Check Hardware"; hw.disabled = false; hw.onclick = () => checkHardware(p);
+      // "Continue Anyway" is removed on every modal open
+      const cont = document.getElementById("d-continue");
+      if (cont) cont.remove();
 
       // "Explain simply": rewrite the description in plain words via the free AI.
       const ex = document.getElementById("d-explain");
@@ -326,6 +338,80 @@
         } catch (e) { ex.textContent = "✨ Explain simply"; ex.disabled = false; }
       };
       document.getElementById("overlay").classList.add("open");
+    }
+
+    // --- hardware compatibility check (before install) --------------------
+    function _requestNotification() {
+      if (!("Notification" in window)) return;
+      if (Notification.permission === "default") Notification.requestPermission();
+    }
+
+    function _sendNotification(title, body) {
+      if (!("Notification" in window) || Notification.permission !== "granted") return;
+      try { new Notification(title, { body, icon: "/static/favicon.ico" }); } catch (_) {}
+    }
+
+    async function checkHardware(p) {
+      const resultEl = document.getElementById("d-check-result");
+      const hwBtn = document.getElementById("d-check-hw");
+      const instBtn = document.getElementById("d-install");
+
+      hwBtn.disabled = true; hwBtn.textContent = "Checking…";
+      instBtn.disabled = true;
+      resultEl.innerHTML = `<div class="muted">Checking your system against the project requirements…</div>`;
+      resultEl.className = "";
+
+      _requestNotification();
+
+      let data;
+      try {
+        data = await api("/api/check-compatibility", {
+          method: "POST", body: JSON.stringify({ repo_url: p.repo }),
+        });
+      } catch (e) {
+        hwBtn.disabled = false; hwBtn.textContent = "Check Hardware";
+        instBtn.disabled = false;
+        resultEl.innerHTML = `<div class="warn">✗ Check failed: ${esc("" + e)}</div>`;
+        return;
+      }
+
+      hwBtn.textContent = "Re-check";
+      hwBtn.disabled = false;
+
+      if (data.compatible) {
+        resultEl.innerHTML = `<div style="background:rgba(63,185,80,.12);border:1px solid var(--green);color:var(--green);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">✓ Your system meets the project's requirements.</div>`;
+        instBtn.disabled = false;
+        _sendNotification(p.name, "Your system meets the requirements.");
+      } else {
+        const checks = (data.checks || []).map(c =>
+          `<tr><td>${esc(c.name)}</td><td>${c.status === "error" ? "✗" : c.status === "warning" ? "⚠" : "✓"}</td><td>${esc(c.current)}</td><td>${esc(c.required)}</td><td>${esc(c.message)}</td></tr>`
+        ).join("");
+        const hw = data.hw || {};
+        const specLines = [];
+        if (hw.os_name) specLines.push(`<b>OS:</b> ${esc(hw.os_name)} (${esc(hw.os_arch)})`);
+        if (hw.cpu_model) specLines.push(`<b>CPU:</b> ${esc(hw.cpu_model)} (${hw.cpu_cores} cores)`);
+        if (hw.ram_gb) specLines.push(`<b>RAM:</b> ${hw.ram_gb.toFixed(1)} GB`);
+        if (hw.disk_free_gb) specLines.push(`<b>Free Disk:</b> ${hw.disk_free_gb.toFixed(1)} GB`);
+        if (hw.gpu_model) specLines.push(`<b>GPU:</b> ${esc(hw.gpu_model)}${hw.gpu_vram_gb ? " (" + hw.gpu_vram_gb.toFixed(1) + " GB VRAM)" : ""}`);
+
+        resultEl.innerHTML = `
+          <div style="background:rgba(248,81,73,.12);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">
+            <b>✗ System check failed</b> — your machine doesn't meet the requirements.
+          </div>
+          ${specLines.length ? `<div class="muted" style="margin-bottom:8px;font-size:12px">${specLines.join(" · ")}</div>` : ""}
+          <table style="width:100%;font-size:12px;border-collapse:collapse;margin:8px 0;">
+            <tr style="color:var(--muted);font-weight:600"><td style="padding:4px 6px">Check</td><td>Status</td><td>You have</td><td>Required</td><td>Detail</td></tr>
+            ${checks}
+          </table>
+          <div class="row">
+            <button class="btn" id="d-continue">Continue Anyway</button>
+          </div>`;
+        instBtn.disabled = true;
+        // Wire up "Continue Anyway" after inserting into DOM
+        const cont = document.getElementById("d-continue");
+        if (cont) cont.onclick = () => startInstall(p.repo);
+        _sendNotification(p.name, "Your system may not meet the requirements. Click to review.");
+      }
     }
     function closeOverlay() { document.getElementById("overlay").classList.remove("open"); }
 
