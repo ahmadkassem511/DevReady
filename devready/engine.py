@@ -176,11 +176,11 @@ class Engine:
 
         self._step_detect()
         self._step_analyze_readme()
-        # Step 3: compatibility check (skipped with --yes for unattended installs)
-        if not self.assume_yes:
-            self._step_system_check()
-            if not self._install_ok:
-                return False  # blocked by compatibility check
+        # Step 3: compatibility check (critical mismatches block install;
+        # --yes suppresses the block but still shows the report)
+        self._step_system_check()
+        if not self._install_ok and not self.assume_yes:
+            return False  # blocked by compatibility check
         self._print_plan()  # complete plan (toolchains + packages + env) before any install
         self._step_system_deps()
         self._step_environment()
@@ -332,7 +332,7 @@ class Engine:
                 "  [error]This machine does not meet the project's requirements — "
                 "installation aborted.[/error]"
                 "\n  [muted]Override with [bold]devready start --yes[/bold] "
-                "(skips compatibility checks).[/muted]"
+                "(proceeds despite hardware warnings).[/muted]"
             )
 
     # -- Step 4: System dependency install -----------------------------------
