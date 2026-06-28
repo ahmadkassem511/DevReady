@@ -1054,39 +1054,62 @@ class Engine:
     def _check_response_body(url: str, log_path: Optional[Path] = None) -> Optional[str]:
         """GET the URL and return a warning if the page seems broken/blank, else None.
 
-        When the request fails, also checks the server log for clues like pending
-        compilation (Next.js dev servers can take 30+ seconds on cold start).
+        Polls with shorter timeouts so we can detect slow compilation (Next.js on
+        first start can take 60+ seconds on Windows). After each failure checks the
+        server log — if "compiling" appears we return a helpful message immediately
+        instead of waiting for a timeout.
         """
-        try:
-            resp = httpx.get(url, timeout=30.0, headers={"User-Agent": "DevReady/1.0"})
-            body = resp.text.strip()
-            if resp.status_code >= 400:
-                return f"HTTP {resp.status_code} — the server returned an error"
-            if len(body) < 100:
-                return "The page appears blank or nearly empty — check the server log for errors"
-            lowered = body.lower()
-            if any(p in lowered for p in (
-                "cannot get", "cannot find", "not found", "internal server error",
-                "application error", "an error occurred", "missing api key",
-                "invalid api key", "configuration error",
-            )):
-                return "The page reports an application error — check your .env configuration"
-            return None
-        except httpx.RequestError as exc:
-            # Check server log for compilation-in-progress hints
-            if log_path is not None:
-                try:
-                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                    if "compiling" in log_text.lower():
-                        return (
-                            "The development server is still compiling — this can take a minute\n"
-                            "  on first start. The page will load once compilation finishes."
-                        )
-                except OSError:
-                    pass
-            return f"Could not verify the page: {exc}"
-        except Exception:
-            return None
+        import time as time_module
+        deadline = time_module.time() + 90  # total budget: 90 seconds
+        poll_errors = 0
+        while time_module.time() < deadline:
+            remaining = deadline - time_module.time()
+            poll_timeout = min(15.0, max(2.0, remaining))
+            try:
+                resp = httpx.get(url, timeout=poll_timeout, headers={"User-Agent": "DevReady/1.0"})
+                body = resp.text.strip()
+                if resp.status_code >= 400:
+                    return f"HTTP {resp.status_code} — the server returned an error"
+                if len(body) < 100:
+                    return "The page appears blank or nearly empty — check the server log for errors"
+                lowered = body.lower()
+                if any(p in lowered for p in (
+                    "cannot get", "cannot find", "not found", "internal server error",
+                    "application error", "an error occurred", "missing api key",
+                    "invalid api key", "configuration error",
+                )):
+                    return "The page reports an application error — check your .env configuration"
+                return None  # success — page responds and looks OK
+            except httpx.RequestError:
+                poll_errors += 1
+                # Check log for compilation hints after each failure
+                if log_path is not None and poll_errors >= 2:
+                    try:
+                        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                        if "compiling" in log_text.lower():
+                            return (
+                                "The development server is still compiling — this can take a minute\n"
+                                "  on first start. The page will load once compilation finishes."
+                            )
+                    except OSError:
+                        pass
+                # Brief pause before retry
+                time_module.sleep(1)
+        # Exhausted the budget — meaningful message about what we observed
+        if log_path is not None:
+            try:
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                if "compiling" in log_text.lower():
+                    return (
+                        "The development server is still compiling — this can take a minute\n"
+                        "  on first start. Check back at the URL in a moment."
+                    )
+            except OSError:
+                pass
+        return (
+            "Could not verify the page within 90 seconds. The server may be stuck on\n"
+            "  a compilation error — check the log for clues."
+        )
 
     def _resolve_launch(self) -> Tuple[Optional[List[str]], Optional[int]]:
         """Return ``(command, port)`` for starting the project, or ``(None, None)``.
