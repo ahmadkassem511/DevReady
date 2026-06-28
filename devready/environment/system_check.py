@@ -36,6 +36,7 @@ class HardwareInfo:
     disk_free_gb: float    # free space on the project drive
     gpu_model: Optional[str] = None
     gpu_vram_gb: Optional[float] = None
+    gpu_cuda_capable: bool = False
 
 
 @dataclass
@@ -47,6 +48,7 @@ class SystemRequirements:
     ram_min_gb: Optional[float] = None
     disk_min_gb: Optional[float] = None
     gpu_required: bool = False
+    gpu_cuda_required: bool = False
     gpu_vram_min_gb: Optional[float] = None
     notes: str = ""
     source: str = "none"    # "llm", "regex", or "none"
@@ -115,7 +117,7 @@ def get_hardware_info(project_dir: Path = Path.cwd()) -> HardwareInfo:
         disk_free_gb = 0.0
 
     # GPU (best-effort)
-    gpu_model, gpu_vram = _detect_gpu()
+    gpu_model, gpu_vram, gpu_cuda = _detect_gpu()
 
     return HardwareInfo(
         os_name=os_name,
@@ -126,6 +128,7 @@ def get_hardware_info(project_dir: Path = Path.cwd()) -> HardwareInfo:
         disk_free_gb=disk_free_gb,
         gpu_model=gpu_model,
         gpu_vram_gb=gpu_vram,
+        gpu_cuda_capable=gpu_cuda,
     )
 
 
@@ -197,8 +200,11 @@ def _detect_ram() -> float:
     return 0.0
 
 
-def _detect_gpu() -> Tuple[Optional[str], Optional[float]]:
-    """Detect GPU model and VRAM. Returns (model, vram_gb) or (None, None)."""
+def _detect_gpu() -> Tuple[Optional[str], Optional[float], bool]:
+    """Detect GPU model, VRAM, and CUDA capability.
+
+    Returns ``(model, vram_gb, cuda_capable)`` or ``(None, None, False)``.
+    """
     system = platform.system()
     try:
         if system == "Windows":
@@ -217,7 +223,7 @@ def _detect_gpu() -> Tuple[Optional[str], Optional[float]]:
                     vram = int(ram_str) / (1024 ** 3)
                 except (ValueError, TypeError):
                     vram = None
-                return model, vram
+                return model, vram, _gpu_is_cuda_capable(model)
         elif system == "Linux":
             if command_exists("nvidia-smi"):
                 result = subprocess.run(
@@ -233,7 +239,15 @@ def _detect_gpu() -> Tuple[Optional[str], Optional[float]]:
                             vram = float(parts[1].replace(" MiB", "").strip()) / 1024
                         except ValueError:
                             vram = None
-                        return model, vram
+                        return model, vram, True  # nvidia-smi exists → CUDA-capable
+            # No nvidia-smi — try lspci for the model name
+            result = subprocess.run(
+                ["lspci"], capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                if "VGA" in line or "3D" in line:
+                    model = line.split(":", 2)[-1].strip() if ":" in line else line
+                    return model, None, _gpu_is_cuda_capable(model)
         elif system == "Darwin":
             result = subprocess.run(
                 ["system_profiler", "SPDisplaysDataType"],
@@ -253,10 +267,30 @@ def _detect_gpu() -> Tuple[Optional[str], Optional[float]]:
                             vram /= 1024
                     except ValueError:
                         vram = None
-            return model, vram
+            if model:
+                return model, vram, _gpu_is_cuda_capable(model)
     except Exception:
         pass
-    return None, None
+    return None, None, False
+
+
+def _gpu_is_cuda_capable(model: str) -> bool:
+    """Check whether a GPU model string indicates CUDA support.
+
+    CUDA is NVIDIA-only. Intel integrated GPUs and most AMD GPUs do not support
+    CUDA (AMD uses ROCm). Returns False when the model is unknown / ambiguous.
+    """
+    if not model:
+        return False
+    lower = model.lower()
+    # NVIDIA models are CUDA-capable.
+    if "nvidia" in lower:
+        return True
+    # Known non-CUDA architectures.
+    if "intel" in lower or "amd" in lower or "apple" in lower or "microsoft" in lower:
+        return False
+    # Best-effort: if we can't tell, assume not CUDA-capable.
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +310,8 @@ _REQUIREMENTS_SYSTEM_PROMPT = (
     '  "disk_min_gb": minimum free disk space in GB, or null,\n'
     '  "gpu_required": boolean — true only if the project explicitly requires a '
     "GPU (CUDA, Metal, etc.),\n"
+    '  "gpu_cuda_required": boolean — true only if the project requires a '
+    "CUDA-capable NVIDIA GPU specifically,\n"
     '  "gpu_vram_min_gb": minimum GPU VRAM in GB if specified, or null,\n'
     '  "notes": one short sentence with any other relevant hardware notes, '
     'or "" if none.\n'
@@ -394,8 +430,12 @@ def _extract_regex(readme_text: str) -> Optional[SystemRequirements]:
             break
 
     # GPU
-    if re.search(r"(cuda|requires?\s+(a\s+)?gpu|nvidia\s+gpu)", text):
+    if re.search(r"(requires?\s+(a\s+)?gpu|nvidia\s+gpu)", text):
         req.gpu_required = True
+    # CUDA-specific requirement
+    if re.search(r"cuda", text):
+        req.gpu_required = True
+        req.gpu_cuda_required = True
     vram_match = re.search(
         r"(?:minimum|requires?|recommends?)\s*(?:at\s+least\s+)?"
         r"(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?vram",
@@ -421,6 +461,7 @@ def _extract_regex(readme_text: str) -> Optional[SystemRequirements]:
         or req.cpu_min_cores is not None
         or req.cpu_arch is not None
         or req.gpu_required
+        or req.gpu_cuda_required
         or req.gpu_vram_min_gb is not None
     )
     if not has_any:
@@ -437,6 +478,7 @@ def _dict_to_requirements(data: dict) -> SystemRequirements:
         ram_min_gb=_as_float(data.get("ram_min_gb")),
         disk_min_gb=_as_float(data.get("disk_min_gb")),
         gpu_required=bool(data.get("gpu_required")),
+        gpu_cuda_required=bool(data.get("gpu_cuda_required")),
         gpu_vram_min_gb=_as_float(data.get("gpu_vram_min_gb")),
         notes=str(data.get("notes", "")).strip(),
         source="llm",
@@ -560,11 +602,21 @@ def check_compatibility(hw: HardwareInfo, req: SystemRequirements) -> Compatibil
     # GPU (critical if required)
     if req.gpu_required:
         if hw.gpu_model:
-            checks.append(CheckResult(
-                "GPU", "ok",
-                hw.gpu_model or "None detected", "Required",
-                f"GPU detected: {hw.gpu_model}.",
-            ))
+            # CUDA-specific check: project requires CUDA but GPU isn't CUDA-capable.
+            if req.gpu_cuda_required and not hw.gpu_cuda_capable:
+                compatible = False
+                checks.append(CheckResult(
+                    "GPU", "error",
+                    f"{hw.gpu_model} (not CUDA)", "CUDA-capable GPU",
+                    f"This project requires a CUDA-capable GPU, but "
+                    f"{hw.gpu_model} does not support CUDA.",
+                ))
+            else:
+                checks.append(CheckResult(
+                    "GPU", "ok",
+                    hw.gpu_model or "None detected", "Required",
+                    f"GPU detected: {hw.gpu_model}.",
+                ))
             if req.gpu_vram_min_gb is not None and hw.gpu_vram_gb is not None:
                 if hw.gpu_vram_gb >= req.gpu_vram_min_gb:
                     checks.append(CheckResult(
@@ -580,10 +632,15 @@ def check_compatibility(hw: HardwareInfo, req: SystemRequirements) -> Compatibil
                     ))
         else:
             compatible = False
+            label = "CUDA-capable GPU" if req.gpu_cuda_required else "GPU"
+            detail = (
+                "This project requires a CUDA-capable GPU but none was detected."
+                if req.gpu_cuda_required
+                else "This project requires a GPU but none was detected on your system."
+            )
             checks.append(CheckResult(
                 "GPU", "error",
-                "Not detected", "Required",
-                "This project requires a GPU but none was detected on your system.",
+                "Not detected", label, detail,
             ))
 
     # If no requirements were found, note that the system looks capable
@@ -622,8 +679,12 @@ def print_report(report: CompatibilityReport) -> None:
             f"[bold]Free Disk:[/bold] {hw.disk_free_gb:.1f} GB",
         ]
         if hw.gpu_model:
-            vram = f", {hw.gpu_vram_gb:.1f} GB VRAM" if hw.gpu_vram_gb else ""
-            hw_lines.append(f"[bold]GPU:[/bold] {hw.gpu_model}{vram}")
+            parts = [hw.gpu_model]
+            if hw.gpu_vram_gb:
+                parts.append(f"{hw.gpu_vram_gb:.1f} GB VRAM")
+            if hw.gpu_cuda_capable:
+                parts.append("CUDA")
+            hw_lines.append(f"[bold]GPU:[/bold] {', '.join(parts)}")
         else:
             hw_lines.append("[bold]GPU:[/bold] [muted]Not detected or unavailable[/muted]")
 
@@ -649,7 +710,8 @@ def print_report(report: CompatibilityReport) -> None:
             req_lines.append(f"[bold]Free Disk:[/bold] ≥ {req.disk_min_gb:.0f} GB")
         if req.gpu_required:
             vram = f" (≥ {req.gpu_vram_min_gb:.0f} GB VRAM)" if req.gpu_vram_min_gb else ""
-            req_lines.append(f"[bold]GPU:[/bold] Required{vram}")
+            cuda = "CUDA " if req.gpu_cuda_required else ""
+            req_lines.append(f"[bold]GPU:[/bold] {cuda}Required{vram}")
         if req.notes:
             req_lines.append(f"[bold]Notes:[/bold] {req.notes}")
 
