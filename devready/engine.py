@@ -583,11 +583,18 @@ class Engine:
                 console.print("  [muted]Attempting to start anyway…[/muted]")
             else:
                 console.print("  [muted]Compose configuration validated.[/muted]")
-            # Pass the project's .env explicitly so compose variables resolve correctly
+            # Pass the project's .env explicitly so compose variables resolve correctly.
+            # Also detect profiles: when every service has an explicit profiles: key,
+            # Docker Compose says "no service selected" unless --profile is passed.
             env_file = self.project_dir / ".env"
-            compose_cmd = ["docker", "compose", "up", "-d"]
+            compose_cmd = ["docker", "compose"]
             if env_file.exists():
-                compose_cmd = ["docker", "compose", "--env-file", ".env", "up", "-d"]
+                compose_cmd.append("--env-file")
+                compose_cmd.append(".env")
+            profile = self._detect_compose_profiles(compose)
+            if profile:
+                compose_cmd.extend(["--profile", profile])
+            compose_cmd.extend(["up", "-d"])
             result = run_command(
                 compose_cmd,
                 cwd=str(self.project_dir), capture=False, env=svc_env,
@@ -596,23 +603,6 @@ class Engine:
                 console.print("  [success]Services started.[/success]")
                 self._write_state(docker=True)
                 return
-            # Retry with explicit profile when "no service selected" — the compose
-            # file uses Docker Compose profiles and all services are behind one.
-            if result.returncode != 0 and "no service selected" in (result.stderr or "").lower():
-                profile = self._detect_compose_profiles(compose)
-                if profile:
-                    console.print(
-                        f"  [info]All services use profiles — retrying with --profile {profile}[/info]"
-                    )
-                    profile_cmd = compose_cmd + ["--profile", profile]
-                    result = run_command(
-                        profile_cmd,
-                        cwd=str(self.project_dir), capture=False, env=svc_env,
-                    )
-                    if result.ok:
-                        console.print("  [success]Services started.[/success]")
-                        self._write_state(docker=True)
-                        return
             console.print("  [error]Failed to start services.[/error]")
             return
 
