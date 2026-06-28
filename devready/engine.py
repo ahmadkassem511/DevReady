@@ -30,7 +30,7 @@ from rich.table import Table
 from .ai import ReadmeInsights, parse_readme
 from .config import Config, list_projects, register_project
 from .detectors import DetectionResult, detect_stack
-from .environment import env_vars, services, strategies, system_deps, version_manager
+from .environment import env_vars, services, strategies, system_check, system_deps, version_manager
 from .utils import (
     _resolve_windows_executable,
     command_exists,
@@ -41,7 +41,7 @@ from .utils import (
 )
 
 # Total number of pipeline steps, used for the "[n/TOTAL]" headers.
-TOTAL_STEPS = 8
+TOTAL_STEPS = 9
 
 
 class Engine:
@@ -176,6 +176,11 @@ class Engine:
 
         self._step_detect()
         self._step_analyze_readme()
+        # Step 3: compatibility check (skipped with --yes for unattended installs)
+        if not self.assume_yes:
+            self._step_system_check()
+            if not self._install_ok:
+                return False  # blocked by compatibility check
         self._print_plan()  # complete plan (toolchains + packages + env) before any install
         self._step_system_deps()
         self._step_environment()
@@ -309,18 +314,39 @@ class Engine:
                 return candidate
         return None
 
-    # -- Step 3: System dependency install -----------------------------------
+    # -- Step 3: System compatibility check ----------------------------------
+    def _step_system_check(self) -> None:
+        """Check hardware vs requirements and block install on critical mismatches."""
+        print_step(3, TOTAL_STEPS, "System Compatibility Check")
+        readme = self._find_readme()
+        readme_text = readme.read_text(encoding="utf-8") if readme else ""
+        hw = system_check.get_hardware_info(self.project_dir)
+        req = system_check.extract_requirements(
+            readme_text, self.config, self.detections,
+        )
+        report = system_check.check_compatibility(hw, req)
+        system_check.print_report(report)
+        if not report.compatible:
+            self._install_ok = False
+            console.print(
+                "  [error]This machine does not meet the project's requirements — "
+                "installation aborted.[/error]"
+                "\n  [muted]Override with [bold]devready start --yes[/bold] "
+                "(skips compatibility checks).[/muted]"
+            )
+
+    # -- Step 4: System dependency install -----------------------------------
     def _step_system_deps(self) -> None:
-        print_step(3, TOTAL_STEPS, "System Dependencies")
+        print_step(4, TOTAL_STEPS, "System Dependencies")
         packages = self.insights.system_packages
         if not packages:
             console.print("  [muted]No system packages required.[/muted]")
             return
         system_deps.ensure_packages(packages, assume_yes=self.assume_yes)
+    # -- Step 5: Environment setup -------------------------------------------
 
-    # -- Step 4: Environment setup -------------------------------------------
     def _step_environment(self) -> None:
-        print_step(4, TOTAL_STEPS, "Environment Setup")
+        print_step(5, TOTAL_STEPS, "Environment Setup")
 
         # Re-discover tools that are installed but missing from this process's
         # PATH (common when launched from the GUI). Cheap, and saves a needless
@@ -526,19 +552,19 @@ class Engine:
             f"falling back to DevReady's standard dependency install.[/warning]"
         )
         return False
+    # -- Step 6: Environment variables ---------------------------------------
 
-    # -- Step 5: Environment variables ---------------------------------------
     def _step_env_vars(self) -> None:
-        print_step(5, TOTAL_STEPS, "Environment Variables")
+        print_step(6, TOTAL_STEPS, "Environment Variables")
         env_vars.generate_env_file(
             self.project_dir,
             readme_env_vars=self.insights.env_vars,
             interactive=not self.assume_yes,  # --yes leaves blanks rather than prompting
         )
+    # -- Step 7: Services (databases / caches / docker-compose) --------------
 
-    # -- Step 6: Services (databases / caches / docker-compose) --------------
     def _step_docker(self) -> None:
-        print_step(6, TOTAL_STEPS, "Services")
+        print_step(7, TOTAL_STEPS, "Services")
         self._bring_up_services(announce_none=True)
 
     def _bring_up_services(self, announce_none: bool = False) -> None:
@@ -672,10 +698,10 @@ class Engine:
             except OSError:
                 pass
         return env
+    # -- Step 8: Database migrations -----------------------------------------
 
-    # -- Step 7: Database migrations -----------------------------------------
     def _step_migrations(self) -> None:
-        print_step(7, TOTAL_STEPS, "Database Migrations")
+        print_step(8, TOTAL_STEPS, "Database Migrations")
 
         env = self._migration_env()
         cwd = str(self.project_dir)
@@ -723,10 +749,10 @@ class Engine:
             run_command(["php", "artisan", "migrate", "--force"], cwd=cwd, capture=False, env=env)
         else:
             console.print("  [muted]No migration tool detected — skipping.[/muted]")
+    # -- Step 9: Launch -------------------------------------------------------
 
-    # -- Step 8: Launch -------------------------------------------------------
     def _step_launch(self) -> None:
-        print_step(8, TOTAL_STEPS, "Launch")
+        print_step(9, TOTAL_STEPS, "Launch")
 
         # Don't launch if a dependency install step failed — the process would
         # crash immediately with a ModuleNotFoundError anyway, and the user
