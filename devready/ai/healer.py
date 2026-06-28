@@ -60,6 +60,38 @@ _FORBIDDEN_TOKENS = (
     "| sh", "| bash", "| iex", "|iex", "-enc", "rd /s", "chmod 777 /", "chown -r",
 )
 
+# Known build-failure signatures that are diagnosed offline to avoid wasting LLM
+# calls on common, well-understood issues. Each entry is a (substring_pattern,
+# diagnosis_message, is_skippable) tuple. The pattern is searched case-insensitively
+# in the error output. When is_skippable is True, the healer treats the failure as
+# recovered (the component can be skipped) and continues.
+_KNOWN_FAILURES: "List[tuple[str, str, bool]]" = [
+    # Rust / Windows — MSVC C++ Build Tools
+    ("webview2-com-sys", "Rust's webview2-com-sys crate needs the Windows SDK (MSVC build tools). "
+     "Install from: https://visualstudio.microsoft.com/visual-cpp-build-tools/", False),
+    ("link.exe", "A C/C++ linker was not found. On Windows, install MSVC Build Tools from: "
+     "https://visualstudio.microsoft.com/visual-cpp-build-tools/", False),
+    ("link.exe not found", "The MSVC linker (link.exe) is missing. "
+     "Install Visual Studio C++ Build Tools.", False),
+    # Tauri template placeholder — development scaffold, not a real crate
+    ("tauri-plugin-{{name}}", "A Tauri plugin workspace template wasn't rendered — this is a "
+     "development scaffold, not an installable crate. Safe to skip.", True),
+    ('name = "tauri-plugin-{{', "Tauri plugin template placeholder — not a real Rust crate. "
+     "Safe to skip.", True),
+    # npm / Node — common issues
+    ("enoent", "A file referenced by the project is missing — check that all required "
+     "assets exist.", False),
+    ("eintegrity", "npm integrity check failed — the lockfile may be corrupted. Try "
+     "deleting node_modules and package-lock.json, then re-run.", True),
+    # Python / pip — GPU packages that can't build on CPU-only machines
+    ("flash_attn", "flash-attn is a CUDA-only package — it can't build on this machine. "
+     "Skipping it is safe unless you need GPU attention layers.", True),
+    ("cuda_home", "CUDA is not installed — GPU-accelerated packages will fall back to CPU.", False),
+    # Docker Compose
+    ("no service selected", "Docker Compose found no services — variables in the compose file "
+     "may resolve to empty strings. Check your .env file.", False),
+]
+
 
 @dataclass
 class FixAction:
@@ -116,7 +148,14 @@ class InstallHealer:
             if result.ok:
                 return result
 
-        # 2. Resilient requirements install: if a single dependency can't be built
+        # 2. Check known-failure signatures (offline, no LLM needed). This catches
+        #    common issues like missing Windows SDK build tools, Tauri template
+        #    placeholders, and npm lockfile corruption without an API call.
+        known_result = self._check_known_failures(result.stdout, result)
+        if known_result is not None:
+            return known_result
+
+        # 3. Resilient requirements install: if a single dependency can't be built
         #    or found (e.g. a CUDA/compiler package like flash_attn on a CPU box),
         #    install everything ELSE and skip the offender — so the project still
         #    gets set up instead of failing wholesale.
@@ -126,7 +165,7 @@ class InstallHealer:
             if result.ok:
                 return result
 
-        # 3. LLM-guided healing loop (only if a key is configured). Fixes run in
+        # 4. LLM-guided healing loop (only if a key is configured). Fixes run in
         #    the project's interpreter, not a global one.
         if self.config.llm.is_configured:
             result = self._heal_loop(list(command), cwd, result, description, env, interpreter)
@@ -277,6 +316,26 @@ class InstallHealer:
                 unique.append(r)
         return unique
 
+    def _check_known_failures(self, error_text: str, current_result: CommandResult) -> Optional[CommandResult]:
+        """Check error output against known-failure signatures before calling the LLM.
+
+        Returns a CommandResult if the failure was handled and considered recoverable,
+        or None to proceed to the LLM healing loop (or return the original error).
+        """
+        lowered = (error_text or "").lower()
+        for pattern, diagnosis, skippable in _KNOWN_FAILURES:
+            if pattern in lowered:
+                console.print(f"  [info]Diagnosis:[/info] {diagnosis}")
+                if skippable:
+                    console.print("  [muted]Continuing — this is not a blocking error.[/muted]")
+                    return CommandResult(
+                        command=current_result.command, returncode=0,
+                        stdout=current_result.stdout, stderr="",
+                    )
+                console.print("  [warning]This issue can't be auto-fixed — see above.[/warning]")
+                return None
+        return None
+
     # -- LLM healing loop ----------------------------------------------------
     def _heal_loop(
         self,
@@ -340,7 +399,7 @@ class InstallHealer:
 
         # Send only the tail of the output — that's where the real error is, and
         # it keeps us inside free-tier context windows.
-        error_tail = "\n".join(result.stdout.splitlines()[-60:])
+        error_tail = "\n".join(result.stdout.splitlines()[-100:])
         files = self._project_signature()
         return (
             f"OS: {platform.system()} ({platform.machine()})\n"

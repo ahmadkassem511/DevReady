@@ -23,6 +23,8 @@ import webbrowser
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import httpx
+
 from rich.table import Table
 
 from .ai import ReadmeInsights, parse_readme
@@ -66,6 +68,7 @@ class Engine:
         self._install_ok: bool = True  # set False if a dep-install step fails
         self._project_setup_ran: bool = False  # True if the project's own setup ran
         self._attempted_commands: set = set()  # launch commands already tried this run
+        self._failed_languages: set = set()  # languages that failed at root — skip in subprojects
         self._extra_path: Optional[str] = None  # dir to prepend on launch (e.g. podman docker-shim)
         self._container_runtime = None  # cached (name, path_prefix) once checked this run
 
@@ -357,6 +360,9 @@ class Engine:
                 # OK — a later language succeeding must not mask an earlier failure.
                 if outcomes:
                     self._install_ok = self._install_ok and all(o.ok for o in outcomes)
+                # Track failed languages so we can skip matching subprojects.
+                if not all(o.ok for o in outcomes):
+                    self._failed_languages.add(det.language)
         else:
             console.print("  [muted]No known stack at the project root.[/muted]")
 
@@ -416,6 +422,14 @@ class Engine:
         for subdir, results in subprojects:
             rel = subdir.relative_to(self.project_dir).as_posix()
             langs = ", ".join(r.language for r in results)
+            # Skip if this subproject uses a language that already failed at root
+            sub_languages = {r.language for r in results}
+            if sub_languages & self._failed_languages:
+                console.print(
+                    f"    [warning]{rel} uses [bold]{', '.join(sorted(sub_languages & self._failed_languages))}[/bold] "
+                    f"which could not be set up at the project root — skipping sub-project.[/warning]"
+                )
+                continue
             if not self._confirm(f"    Set up [bold]{rel}[/bold] ({langs})? [Y/n] "):
                 console.print(f"    [muted]Skipped {rel}.[/muted]")
                 continue
@@ -462,6 +476,17 @@ class Engine:
 
         strategy = detected[0]
 
+        # On Windows, skip bash-based setup scripts (setup.sh, etc.). Most are
+        # Unix-only and will fail with "Unsupported operating system". The user
+        # can still run them manually if they have WSL or Cygwin.
+        if sys.platform == "win32" and strategy.runner == "bash":
+            console.print(
+                f"  [warning]This project's setup uses [bold]{strategy.display}[/bold], "
+                "which is typically Unix-only.\n"
+                "  Skipping it — using DevReady's standard setup instead.[/warning]"
+            )
+            return False
+
         # If the tool that runs this setup isn't installed, offer to install it
         # and then continue — DevReady shouldn't dead-end on a missing tool.
         if not command_exists(strategy.runner):
@@ -480,7 +505,9 @@ class Engine:
             # Tool is now available — fall through and run the strategy.
         else:
             console.print(f"  This project provides its own setup: [bold]{strategy.display}[/bold]")
-            if not self._confirm("  Run the project's setup instead of the default? [Y/n] "):
+            if not self._confirm(
+                "  Run the project's setup instead of the default? [Y/n] "
+            ):
                 console.print("  [muted]Skipping it — using DevReady's standard setup instead.[/muted]")
                 return False
 
@@ -542,8 +569,32 @@ class Engine:
 
         if compose is not None:
             console.print(f"  Starting services from {compose.name} (docker compose up -d)…")
+            # Validate compose config before running — catches "no service selected"
+            # and missing-variable errors early with a clear message.
+            validate = run_command(
+                ["docker", "compose", "config", "--no-interpolate"],
+                cwd=str(self.project_dir), capture=True, env=svc_env,
+            )
+            if not validate.ok:
+                stderr = validate.stderr or ""
+                console.print(f"  [warning]Docker Compose configuration has issues:[/warning]")
+                for line in stderr.strip().splitlines()[-8:]:
+                    console.print(f"  [muted]{line}[/muted]")
+                if "no service selected" in stderr.lower():
+                    console.print(
+                        "  [warning]The compose file defines no services — variables may "
+                        "resolve to empty strings. Check your .env for required values.[/warning]"
+                    )
+                console.print("  [muted]Attempting to start anyway…[/muted]")
+            else:
+                console.print("  [muted]Compose configuration validated.[/muted]")
+            # Pass the project's .env explicitly so compose variables resolve correctly
+            env_file = self.project_dir / ".env"
+            compose_cmd = ["docker", "compose", "up", "-d"]
+            if env_file.exists():
+                compose_cmd = ["docker", "compose", "--env-file", ".env", "up", "-d"]
             result = run_command(
-                ["docker", "compose", "up", "-d"],
+                compose_cmd,
                 cwd=str(self.project_dir), capture=False, env=svc_env,
             )
             if result.ok:
@@ -900,16 +951,25 @@ class Engine:
             if port:
                 url = f"http://localhost:{port}"
                 served.append(url)
-                console.print(f"  [success]✓ {name} → {url}[/success]")
-                # The server bound its port, but its own code may still have a
-                # build/compile error (dev servers serve an error overlay). Say so
-                # honestly rather than implying everything's fine.
-                build_err = self._scan_build_error(log_path)
-                if build_err:
-                    console.print(
-                        f"  [warning]Heads up: {name} started, but the project's own code reported "
-                        f"a build error — the page may show it:[/warning]\n  [muted]{build_err}[/muted]"
-                    )
+                # Check HTTP response content — not just that the port is open
+                page_warn = self._check_response_body(url)
+                if page_warn:
+                    console.print(f"  [warning]• {name} started on {url}, but: {page_warn}[/warning]")
+                    build_err = self._scan_build_error(log_path)
+                    if build_err:
+                        console.print(f"  [warning]Server log shows: {build_err}[/warning]")
+                    console.print("  [muted]Check the log or your .env configuration and re-run.[/muted]")
+                else:
+                    console.print(f"  [success]✓ {name} → {url}[/success]")
+                    # The server bound its port, but its own code may still have a
+                    # build/compile error (dev servers serve an error overlay). Say so
+                    # honestly rather than implying everything's fine.
+                    build_err = self._scan_build_error(log_path)
+                    if build_err:
+                        console.print(
+                            f"  [warning]Heads up: {name} started, but the project's own code reported "
+                            f"a build error — the page may show it:[/warning]\n  [muted]{build_err}[/muted]"
+                        )
                 if not opened:
                     try:
                         webbrowser.open(url)
@@ -960,6 +1020,29 @@ class Engine:
                 line = text[line_start: line_end if line_end != -1 else len(text)].strip()
                 return line[:200] if line else None
         return None
+
+    @staticmethod
+    def _check_response_body(url: str) -> Optional[str]:
+        """GET the URL and return a warning if the page seems broken/blank, else None."""
+        try:
+            resp = httpx.get(url, timeout=5.0, headers={"User-Agent": "DevReady/1.0"})
+            body = resp.text.strip()
+            if resp.status_code >= 400:
+                return f"HTTP {resp.status_code} — the server returned an error"
+            if len(body) < 100:
+                return "The page appears blank or nearly empty — check the server log for errors"
+            lowered = body.lower()
+            if any(p in lowered for p in (
+                "cannot get", "cannot find", "not found", "internal server error",
+                "application error", "an error occurred", "missing api key",
+                "invalid api key", "configuration error",
+            )):
+                return "The page reports an application error — check your .env configuration"
+            return None
+        except httpx.RequestError as exc:
+            return f"Could not verify the page: {exc}"
+        except Exception:
+            return None
 
     def _resolve_launch(self) -> Tuple[Optional[List[str]], Optional[int]]:
         """Return ``(command, port)`` for starting the project, or ``(None, None)``.

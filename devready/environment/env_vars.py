@@ -14,9 +14,10 @@ Safety notes:
 
 from __future__ import annotations
 
+import re
 import secrets
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from ..utils import console
 
@@ -40,6 +41,42 @@ _KNOWN_DEFAULTS = {
     "REDIS_URL": "redis://localhost:6379/0",
 }
 
+# Known AI provider API key names. When these get random placeholder values,
+# the app won't work — we warn the user after generating .env.
+_AI_API_KEY_NAMES = {
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+    "AZURE_OPENAI_API_KEY", "REPLICATE_API_KEY", "HUGGINGFACE_API_KEY",
+    "COHERE_API_KEY", "AI21_API_KEY", "MISTRAL_API_KEY", "TOGETHER_API_KEY",
+    "GROQ_API_KEY", "PERPLEXITY_API_KEY", "DEEPSEEK_API_KEY",
+    "OPENROUTER_API_KEY", "OPENAI_ORGANIZATION", "OPENAI_BASE_URL",
+}
+
+
+def has_placeholder_api_keys(env_path: Path) -> List[str]:
+    """Return names of AI API keys in .env that have random-looking placeholder values.
+
+    Randomly generated tokens from _default_value_for are 43+ char base64url strings.
+    Real API keys don't match this pattern — we flag them so the user knows to
+    replace them before the app will work.
+    """
+    if not env_path.exists():
+        return []
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    placeholder = re.compile(r"^[A-Za-z0-9_-]{43,}$")
+    found: List[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if name in _AI_API_KEY_NAMES and placeholder.match(value.strip()):
+            found.append(name)
+    return found
+
 
 def _looks_secret(name: str) -> bool:
     """Return True when a variable name suggests it holds a secret."""
@@ -58,8 +95,8 @@ def _default_value_for(name: str) -> str:
     if name in _KNOWN_DEFAULTS:
         return _KNOWN_DEFAULTS[name]
     if _looks_secret(name):
-        # URL-safe token; plenty of entropy for a dev secret.
-        return secrets.token_urlsafe(32)
+        # Hex token — safe for all API key formats and config files.
+        return secrets.token_hex(32)
     return ""
 
 
@@ -141,4 +178,19 @@ def generate_env_file(
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     console.print(f"  [success]Wrote {len(variables)} variables to .env[/success]")
+
+    # Check if any known AI API keys ended up as random placeholders — the user
+    # needs real keys for the app to work.
+    placeholder_keys = has_placeholder_api_keys(env_path)
+    if placeholder_keys:
+        console.print()
+        console.print("  [warning]Some API keys were set to random placeholders — they need real values:[/warning]")
+        for key in placeholder_keys:
+            console.print(f"    [bold]{key}[/bold] (replace with your real key from the provider)")
+        console.print(
+            "  [muted]This app won't work without valid API keys.\n"
+            "  Edit the .env file and replace the random values with your keys.[/muted]"
+        )
+        console.print()
+
     return env_path

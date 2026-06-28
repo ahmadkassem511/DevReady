@@ -172,10 +172,10 @@ TOOL_PACKAGES = {
     # present, so DevReady can set up Rust/Go/Ruby/PHP/Java/.NET projects without
     # the user pre-installing the toolchain. Package names are best-effort per
     # manager; where a mapping is missing, install_tool falls back to the name.
-    "cargo": {  # Rust (rustup provides cargo)
+    "cargo": {  # Rust — prefers rustup (canonical installer) over OS-packaged cargo
         "choco": "rust", "scoop": "rust", "winget": "Rustlang.Rustup",
-        "brew": "rust", "apt": "cargo", "apt-get": "cargo", "dnf": "cargo",
-        "yum": "cargo", "pacman": "rust",
+        "brew": "rust", "apt": "rustup", "apt-get": "rustup", "dnf": "rustup",
+        "yum": "rustup", "pacman": "rust",
     },
     "go": {
         "choco": "golang", "scoop": "go", "winget": "GoLang.Go",
