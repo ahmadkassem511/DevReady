@@ -306,6 +306,28 @@ def _gpu_is_cuda_capable(model: str) -> bool:
     return False
 
 
+def _gpu_is_integrated(model: Optional[str]) -> bool:
+    """True if the GPU is integrated graphics (or a software/basic adapter).
+
+    Integrated GPUs (Intel HD/UHD/Iris, AMD APU Vega, Apple, the Microsoft Basic
+    Render driver) cannot run the heavy CUDA/discrete-GPU workloads that
+    ML/inference projects need — so for the purpose of "this project requires a
+    GPU", they do NOT count as a usable compute GPU.
+    """
+    if not model:
+        return False
+    lower = model.lower()
+    integrated_markers = (
+        "intel",          # Intel HD / UHD / Iris are all integrated
+        "microsoft basic",  # software render adapter
+        "llvmpipe", "swiftshader", "basic render",
+        "radeon(tm) graphics", "amd radeon(tm) graphics",  # AMD APU iGPU
+        "vega 3", "vega 6", "vega 7", "vega 8", "vega 11",  # Ryzen APU iGPUs
+        "apple m",        # Apple Silicon integrated (no CUDA)
+    )
+    return any(m in lower for m in integrated_markers)
+
+
 # ---------------------------------------------------------------------------
 # Requirements extraction
 # ---------------------------------------------------------------------------
@@ -723,6 +745,7 @@ def check_compatibility(hw: HardwareInfo, req: SystemRequirements) -> Compatibil
     # GPU (critical if required)
     if req.gpu_required:
         if hw.gpu_model:
+            integrated = _gpu_is_integrated(hw.gpu_model)
             # CUDA-specific check: project requires CUDA but GPU isn't CUDA-capable.
             if req.gpu_cuda_required and not hw.gpu_cuda_capable:
                 compatible = False
@@ -731,6 +754,17 @@ def check_compatibility(hw: HardwareInfo, req: SystemRequirements) -> Compatibil
                     f"{hw.gpu_model} (not CUDA)", "CUDA-capable GPU",
                     f"This project requires a CUDA-capable GPU, but "
                     f"{hw.gpu_model} does not support CUDA.",
+                ))
+            elif integrated and not hw.gpu_cuda_capable:
+                # A GPU is required, but all we have is integrated graphics —
+                # these can't run the discrete-GPU/CUDA workloads such projects
+                # need. Treat it as a hard mismatch, not a passing "GPU detected".
+                compatible = False
+                checks.append(CheckResult(
+                    "GPU", "error",
+                    f"{hw.gpu_model} (integrated)", "Dedicated GPU",
+                    f"This project requires a dedicated GPU, but "
+                    f"{hw.gpu_model} is integrated graphics and can't run it.",
                 ))
             else:
                 checks.append(CheckResult(

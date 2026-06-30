@@ -130,6 +130,47 @@ def test_merge_takes_smaller_minimums():
     assert merged.disk_min_gb == 50.0
 
 
+def test_integrated_gpu_detection():
+    assert sc._gpu_is_integrated("Intel(R) HD Graphics 3000") is True
+    assert sc._gpu_is_integrated("Intel(R) UHD Graphics 620") is True
+    assert sc._gpu_is_integrated("AMD Radeon(TM) Graphics") is True   # Ryzen APU iGPU
+    assert sc._gpu_is_integrated("Apple M2") is True
+    assert sc._gpu_is_integrated("NVIDIA GeForce RTX 4090") is False  # discrete
+    assert sc._gpu_is_integrated("AMD Radeon RX 6800 XT") is False    # discrete
+    assert sc._gpu_is_integrated(None) is False
+
+
+def test_integrated_gpu_does_not_satisfy_gpu_requirement():
+    """The user's exact case: AI returned only gpu_required (no CUDA flag), and
+    an integrated Intel HD GPU wrongly 'passed'. It must now fail."""
+    hw = sc.HardwareInfo(
+        os_name="Windows 10", os_arch="amd64", cpu_cores=4, cpu_model="i5",
+        ram_gb=7.2, disk_free_gb=12.8,
+        gpu_model="Intel(R) HD Graphics 3000", gpu_vram_gb=2.1, gpu_cuda_capable=False,
+    )
+    req = sc.SystemRequirements(gpu_required=True, source="llm")  # note: cuda flag NOT set
+    report = sc.check_compatibility(hw, req)
+    assert report.compatible is False
+    gpu = next(c for c in report.checks if c.name == "GPU")
+    assert gpu.status == "error"
+    assert "integrated" in gpu.message.lower()
+
+
+def test_discrete_non_cuda_gpu_satisfies_plain_gpu_requirement():
+    """A discrete AMD card (ROCm/DirectML-capable) should satisfy a plain
+    'needs a GPU' requirement that doesn't specifically demand CUDA."""
+    hw = sc.HardwareInfo(
+        os_name="Linux", os_arch="x86_64", cpu_cores=16, cpu_model="Ryzen",
+        ram_gb=32.0, disk_free_gb=500.0,
+        gpu_model="AMD Radeon RX 6800 XT", gpu_cuda_capable=False,
+    )
+    req = sc.SystemRequirements(gpu_required=True, source="regex")  # not cuda-required
+    report = sc.check_compatibility(hw, req)
+    assert report.compatible is True
+    gpu = next(c for c in report.checks if c.name == "GPU")
+    assert gpu.status == "ok"
+
+
 def test_skyreels_style_gpu_repo_is_incompatible_on_non_cuda_machine():
     """End-to-end: a GPU/VRAM repo must be flagged on a CUDA-less machine
     (the bug: it silently 'passed')."""

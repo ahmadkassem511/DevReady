@@ -108,7 +108,12 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
     # -- Pages -------------------------------------------------------------
     @app.get("/")
     def index():
-        return FileResponse(_STATIC_DIR / "index.html")
+        # No-cache so a freshly updated GUI is never hidden behind a stale copy
+        # cached by the browser (the whole single-page app lives in this file).
+        return FileResponse(
+            _STATIC_DIR / "index.html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     if _STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
