@@ -449,11 +449,20 @@ def _extract_regex(readme_text: str) -> Optional[SystemRequirements]:
             req.cpu_arch = arch
             break
 
-    # GPU
-    if re.search(r"(requires?\s+(a\s+)?gpu|nvidia\s+gpu)", text):
+    # GPU — only flag as REQUIRED on explicit phrasing. A passing mention of
+    # "CUDA" or "NVIDIA" (very common in AI READMEs: "tested on", "CUDA optional",
+    # install hints) must NOT mark the project as needing a GPU, or every such
+    # repo would be wrongly blocked on a non-NVIDIA machine.
+    if re.search(
+        r"(requires?\s+(a\s+)?(cuda[- ]?capable\s+)?(nvidia\s+)?gpu"
+        r"|gpu\s+is\s+required|a\s+gpu\s+is\s+required)",
+        text,
+    ):
         req.gpu_required = True
-    # CUDA-specific requirement
-    if re.search(r"cuda", text):
+    if re.search(
+        r"(requires?\s+(a\s+)?cuda|cuda\s+is\s+required|cuda[- ]?capable\s+gpu\s+(is\s+)?required)",
+        text,
+    ):
         req.gpu_required = True
         req.gpu_cuda_required = True
     vram_match = re.search(
@@ -565,7 +574,7 @@ def check_compatibility(hw: HardwareInfo, req: SystemRequirements) -> Compatibil
                 "OS is supported.",
             ))
 
-    # CPU cores (warning)
+    # CPU cores (warning only — fewer cores means slower, not "can't install").
     if req.cpu_min_cores is not None:
         if hw.cpu_cores >= req.cpu_min_cores:
             checks.append(CheckResult(
@@ -574,14 +583,14 @@ def check_compatibility(hw: HardwareInfo, req: SystemRequirements) -> Compatibil
                 f"{hw.cpu_cores} cores meets the requirement of {req.cpu_min_cores}.",
             ))
         else:
-            compatible = False
             checks.append(CheckResult(
-                "CPU Cores", "error",
+                "CPU Cores", "warning",
                 str(hw.cpu_cores), str(req.cpu_min_cores),
-                f"Only {hw.cpu_cores} cores — the project recommends at least {req.cpu_min_cores}.",
+                f"Only {hw.cpu_cores} cores — the project recommends at least {req.cpu_min_cores}; "
+                f"it may run slowly.",
             ))
 
-    # RAM (warning if below, fine if meets)
+    # RAM (warning only — low RAM means slower/limited, not a hard blocker).
     if req.ram_min_gb is not None:
         if hw.ram_gb >= req.ram_min_gb:
             checks.append(CheckResult(
@@ -590,11 +599,11 @@ def check_compatibility(hw: HardwareInfo, req: SystemRequirements) -> Compatibil
                 f"{hw.ram_gb:.1f} GB of RAM meets the requirement of {req.ram_min_gb:.0f} GB.",
             ))
         else:
-            compatible = False
             checks.append(CheckResult(
-                "RAM", "error",
+                "RAM", "warning",
                 f"{hw.ram_gb:.1f} GB", f"{req.ram_min_gb:.0f} GB",
-                f"Only {hw.ram_gb:.1f} GB of RAM — the project requires at least {req.ram_min_gb:.0f} GB.",
+                f"Only {hw.ram_gb:.1f} GB of RAM — the project recommends {req.ram_min_gb:.0f} GB; "
+                f"it may run slowly or need smaller settings.",
             ))
 
     # Disk (warning if below)

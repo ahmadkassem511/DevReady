@@ -66,6 +66,7 @@ class Engine:
         self.detections: List[DetectionResult] = []
         self.insights: ReadmeInsights = ReadmeInsights()
         self._install_ok: bool = True  # set False if a dep-install step fails
+        self._compat_ok: bool = True  # set False ONLY by the hardware check (separate from install)
         self._project_setup_ran: bool = False  # True if the project's own setup ran
         self._attempted_commands: set = set()  # launch commands already tried this run
         self._failed_languages: set = set()  # languages that failed at root — skip in subprojects
@@ -179,8 +180,8 @@ class Engine:
         # Step 3: compatibility check (critical mismatches block install;
         # --yes suppresses the block but still shows the report)
         self._step_system_check()
-        if not self._install_ok and not self.assume_yes:
-            return False  # blocked by compatibility check
+        if not self._compat_ok and not self.assume_yes:
+            return False  # blocked by compatibility check (only when not --yes)
         self._print_plan()  # complete plan (toolchains + packages + env) before any install
         self._step_system_deps()
         self._step_environment()
@@ -327,12 +328,13 @@ class Engine:
         report = system_check.check_compatibility(hw, req)
         system_check.print_report(report)
         if not report.compatible:
-            self._install_ok = False
+            # Use a SEPARATE flag — never poison _install_ok, or a hardware
+            # warning would wrongly skip the launch even after deps install fine.
+            self._compat_ok = False
             console.print(
-                "  [error]This machine does not meet the project's requirements — "
-                "installation aborted.[/error]"
-                "\n  [muted]Override with [bold]devready start --yes[/bold] "
-                "(proceeds despite hardware warnings).[/muted]"
+                "  [warning]This machine may not meet the project's requirements.[/warning]"
+                "\n  [muted]Install will still proceed with [bold]--yes[/bold]; otherwise "
+                "re-run with [bold]devready start --yes[/bold] to continue anyway.[/muted]"
             )
 
     # -- Step 4: System dependency install -----------------------------------
