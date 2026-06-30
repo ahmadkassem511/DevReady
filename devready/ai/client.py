@@ -30,6 +30,8 @@ def ask_llm_json(
     user_prompt: str,
     *,
     temperature: float = 0.1,
+    timeout: float = 60,
+    max_attempts: int = MAX_MODEL_ATTEMPTS,
 ) -> Optional[dict]:
     """Send a single chat request and return the parsed JSON object, or None.
 
@@ -37,6 +39,11 @@ def ask_llm_json(
     a retired or rate-limited model doesn't break the feature. Any network error,
     bad key (401), or unparseable reply yields ``None`` — the caller is expected
     to carry on without the LLM's help rather than fail.
+
+    ``timeout`` (per-request seconds) and ``max_attempts`` (how many models to
+    try) are bounded by the caller. Latency-sensitive callers (e.g. the pre-install
+    hardware check) pass a small budget so a slow free model can't stall the UI
+    for minutes — they fall back to the offline regex extractor instead.
     """
     if not config.llm.is_configured:
         return None
@@ -55,7 +62,7 @@ def ask_llm_json(
 
     tried = 0
     for model in models:
-        if tried >= MAX_MODEL_ATTEMPTS:
+        if tried >= max_attempts:
             break
         tried += 1
         payload = {
@@ -67,9 +74,9 @@ def ask_llm_json(
             "temperature": temperature,
         }
         try:
-            response = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=60)
+            response = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=timeout)
         except Exception:
-            return None  # network error — not fixable by trying another model
+            return None  # network error / timeout — not fixable by trying another model
 
         if response.status_code == 200:
             try:

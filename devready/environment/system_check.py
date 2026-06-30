@@ -359,11 +359,16 @@ def extract_requirements(
     readme_text: str,
     config: Optional["Config"] = None,
     detections: Optional[List] = None,
+    *,
+    llm_timeout: float = 60,
+    llm_max_attempts: int = 8,
 ) -> SystemRequirements:
     """Extract hardware requirements from README using LLM then regex fallback.
 
     ``config`` is needed for the LLM path (``Config`` from ``devready.config``).
     ``detections`` is a ``List[DetectionResult]`` with language/framework info.
+    ``llm_timeout``/``llm_max_attempts`` bound the LLM cost; latency-sensitive
+    callers (the pre-install check) pass a small budget and lean on the regex.
     """
     # Run BOTH the LLM and the regex extractor and MERGE them. Using only one or
     # the other is fragile: the LLM may miss a GPU/VRAM requirement that the
@@ -372,7 +377,10 @@ def extract_requirements(
     # project "passes" the check on a machine with no GPU.
     llm_req: Optional[SystemRequirements] = None
     if config is not None and config.llm.is_configured and readme_text.strip():
-        llm_result = _extract_llm(readme_text, config, detections)
+        llm_result = _extract_llm(
+            readme_text, config, detections,
+            timeout=llm_timeout, max_attempts=llm_max_attempts,
+        )
         if llm_result is not None:
             cand = _dict_to_requirements(llm_result)
             if cand.has_any:
@@ -426,6 +434,9 @@ def _extract_llm(
     readme_text: str,
     config: "Config",
     detections: Optional[List] = None,
+    *,
+    timeout: float = 60,
+    max_attempts: int = 8,
 ) -> Optional[dict]:
     """Ask the LLM for hardware requirements. Returns parsed dict or None."""
     from ..ai.client import ask_llm_json
@@ -439,7 +450,10 @@ def _extract_llm(
         f"Frameworks: {frameworks}\n\n"
         f"README excerpt:\n{excerpt}\n"
     )
-    return ask_llm_json(config, _REQUIREMENTS_SYSTEM_PROMPT, user_prompt)
+    return ask_llm_json(
+        config, _REQUIREMENTS_SYSTEM_PROMPT, user_prompt,
+        timeout=timeout, max_attempts=max_attempts,
+    )
 
 
 # Phrases that say a GPU is OPTIONAL or that the project runs on CPU. These

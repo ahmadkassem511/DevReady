@@ -65,12 +65,21 @@ def _run_check(repo_url: str):
         config = Config.load()
         engine = _Engine(project_dir=target, config=config, assume_yes=True)
         engine._step_detect()
-        engine._step_analyze_readme()
+        # NOTE: do NOT call _step_analyze_readme() here — its README insights
+        # aren't used by the compatibility check, and it fires a second (slow)
+        # LLM flow. Detection alone gives extract_requirements the language/
+        # framework context it needs.
 
         readme = engine._find_readme()
         readme_text = readme.read_text(encoding="utf-8") if readme else ""
         hw = system_check.get_hardware_info(target)
-        req = system_check.extract_requirements(readme_text, config, engine.detections)
+        # Keep the check snappy: bound the LLM to a couple of quick attempts and
+        # fall back to the (robust) offline regex extractor rather than letting a
+        # slow/rate-limited free model stall the UI for minutes.
+        req = system_check.extract_requirements(
+            readme_text, config, engine.detections,
+            llm_timeout=20, llm_max_attempts=2,
+        )
         report = system_check.check_compatibility(hw, req)
         return report
     finally:

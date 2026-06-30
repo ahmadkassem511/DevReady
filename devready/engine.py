@@ -322,8 +322,11 @@ class Engine:
         readme = self._find_readme()
         readme_text = readme.read_text(encoding="utf-8") if readme else ""
         hw = system_check.get_hardware_info(self.project_dir)
+        # Bound the LLM so step 3 can't stall for minutes on slow free models;
+        # the offline regex extractor backs it up.
         req = system_check.extract_requirements(
             readme_text, self.config, self.detections,
+            llm_timeout=30, llm_max_attempts=3,
         )
         report = system_check.check_compatibility(hw, req)
         system_check.print_report(report)
