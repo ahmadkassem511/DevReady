@@ -378,40 +378,55 @@
       hwBtn.textContent = "Re-check";
       hwBtn.disabled = false;
 
-      if (data.compatible) {
+      const allChecks = data.checks || [];
+      const hasWarnings = allChecks.some(c => c.status === "warning");
+
+      if (data.compatible && !hasWarnings) {
         resultEl.innerHTML = `<div style="background:rgba(63,185,80,.12);border:1px solid var(--green);color:var(--green);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">✓ Your system meets the project's requirements.</div>`;
         instBtn.disabled = false;
         _sendNotification(p.name, "Your system meets the requirements.");
-      } else {
-        const checks = (data.checks || []).map(c =>
-          `<tr><td>${esc(c.name)}</td><td>${c.status === "error" ? "✗" : c.status === "warning" ? "⚠" : "✓"}</td><td>${esc(c.current)}</td><td>${esc(c.required)}</td><td>${esc(c.message)}</td></tr>`
-        ).join("");
-        const hw = data.hw || {};
-        const specLines = [];
-        if (hw.os_name) specLines.push(`<b>OS:</b> ${esc(hw.os_name)} (${esc(hw.os_arch)})`);
-        if (hw.cpu_model) specLines.push(`<b>CPU:</b> ${esc(hw.cpu_model)} (${hw.cpu_cores} cores)`);
-        if (hw.ram_gb) specLines.push(`<b>RAM:</b> ${hw.ram_gb.toFixed(1)} GB`);
-        if (hw.disk_free_gb) specLines.push(`<b>Free Disk:</b> ${hw.disk_free_gb.toFixed(1)} GB`);
-        if (hw.gpu_model) specLines.push(`<b>GPU:</b> ${esc(hw.gpu_model)}${hw.gpu_vram_gb ? " (" + hw.gpu_vram_gb.toFixed(1) + " GB VRAM)" : ""}`);
-
-        resultEl.innerHTML = `
-          <div style="background:rgba(248,81,73,.12);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">
-            <b>✗ System check failed</b> — your machine doesn't meet the requirements.
-          </div>
-          ${specLines.length ? `<div class="muted" style="margin-bottom:8px;font-size:12px">${specLines.join(" · ")}</div>` : ""}
-          <table style="width:100%;font-size:12px;border-collapse:collapse;margin:8px 0;">
-            <tr style="color:var(--muted);font-weight:600"><td style="padding:4px 6px">Check</td><td>Status</td><td>You have</td><td>Required</td><td>Detail</td></tr>
-            ${checks}
-          </table>
-          <div class="row">
-            <button class="btn" id="d-continue">Continue Anyway</button>
-          </div>`;
-        instBtn.disabled = true;
-        // Wire up "Continue Anyway" after inserting into DOM
-        const cont = document.getElementById("d-continue");
-        if (cont) cont.onclick = () => startInstall(p.repo);
-        _sendNotification(p.name, "Your system may not meet the requirements. Click to review.");
+        return;
       }
+
+      // Either incompatible, or compatible-with-warnings: show the full report
+      // so nothing (e.g. a GPU/VRAM shortfall) is hidden behind a green tick.
+      const checks = allChecks.map(c =>
+        `<tr><td>${esc(c.name)}</td><td>${c.status === "error" ? "✗" : c.status === "warning" ? "⚠" : "✓"}</td><td>${esc(c.current)}</td><td>${esc(c.required)}</td><td>${esc(c.message)}</td></tr>`
+      ).join("");
+      const hw = data.hw || {};
+      const specLines = [];
+      if (hw.os_name) specLines.push(`<b>OS:</b> ${esc(hw.os_name)} (${esc(hw.os_arch)})`);
+      if (hw.cpu_model) specLines.push(`<b>CPU:</b> ${esc(hw.cpu_model)} (${hw.cpu_cores} cores)`);
+      if (hw.ram_gb) specLines.push(`<b>RAM:</b> ${hw.ram_gb.toFixed(1)} GB`);
+      if (hw.disk_free_gb) specLines.push(`<b>Free Disk:</b> ${hw.disk_free_gb.toFixed(1)} GB`);
+      if (hw.gpu_model) specLines.push(`<b>GPU:</b> ${esc(hw.gpu_model)}${hw.gpu_vram_gb ? " (" + hw.gpu_vram_gb.toFixed(1) + " GB VRAM)" : ""}`);
+      else specLines.push(`<b>GPU:</b> none detected`);
+
+      const banner = data.compatible
+        ? `<div style="background:rgba(210,153,34,.14);border:1px solid var(--yellow,#d29922);color:var(--yellow,#d29922);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">
+             <b>⚠ Your system can run the install, but may not run the app well.</b> Review the warnings below.
+           </div>`
+        : `<div style="background:rgba(248,81,73,.12);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">
+             <b>✗ Your machine doesn't meet the project's requirements.</b> You can still try — it may install but fail to run.
+           </div>`;
+
+      resultEl.innerHTML = `
+        ${banner}
+        ${specLines.length ? `<div class="muted" style="margin-bottom:8px;font-size:12px">${specLines.join(" · ")}</div>` : ""}
+        <table style="width:100%;font-size:12px;border-collapse:collapse;margin:8px 0;">
+          <tr style="color:var(--muted);font-weight:600"><td style="padding:4px 6px">Check</td><td>Status</td><td>You have</td><td>Required</td><td>Detail</td></tr>
+          ${checks}
+        </table>
+        <div class="row">
+          <button class="btn" id="d-continue">${data.compatible ? "Install Anyway" : "Continue Anyway"}</button>
+        </div>`;
+      instBtn.disabled = true;
+      // Wire up the continue button after inserting into DOM
+      const cont = document.getElementById("d-continue");
+      if (cont) cont.onclick = () => startInstall(p.repo);
+      _sendNotification(p.name, data.compatible
+        ? "Your system meets the minimum, with warnings. Click to review."
+        : "Your system may not meet the requirements. Click to review.");
     }
     function closeOverlay() { document.getElementById("overlay").classList.remove("open"); }
 

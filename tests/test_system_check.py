@@ -69,3 +69,83 @@ def test_cuda_capability_detection():
     assert sc._gpu_is_cuda_capable("Intel UHD Graphics 620") is False
     assert sc._gpu_is_cuda_capable("AMD Radeon RX 6800") is False
     assert sc._gpu_is_cuda_capable("") is False
+
+
+# -- GPU requirement detection (the SkyReels-style "genuinely needs a GPU") ----
+def test_stated_vram_implies_gpu_required():
+    # The exact phrasing SkyReels-V2 uses — no literal "requires CUDA" anywhere.
+    text = (
+        "## Inference\n"
+        "Single-GPU & Multi-GPU Inference Code.\n"
+        'pipeline = pipeline.to("cuda")\n'
+        "Generating a 540P video using the 1.3B model requires approximately "
+        "14.7GB peak VRAM, while the 14B model demands around 51.2GB peak VRAM.\n"
+    )
+    gpu, cuda, vram = sc._detect_gpu_requirement(text.lower())
+    assert gpu is True
+    assert cuda is True
+    assert vram == 14.7  # smallest stated figure (entry barrier)
+
+
+def test_gpu_inference_phrasing_requires_gpu():
+    gpu, _cuda, _vram = sc._detect_gpu_requirement("supports single-gpu inference.")
+    assert gpu is True
+
+
+def test_cuda_install_instructions_require_cuda():
+    text = "install with: pip install torch --index-url https://download.pytorch.org/whl/cu121 and nvidia driver 535"
+    gpu, cuda, _vram = sc._detect_gpu_requirement(text.lower())
+    assert gpu is True and cuda is True
+
+
+def test_gpu_optional_statement_overrides():
+    # Even with cuda code present, an explicit CPU/optional statement wins.
+    for text in (
+        'runs on cpu. you can also use .to("cuda") if you have a gpu.',
+        "no gpu required — works on cpu.",
+        "gpu is optional; cpu is supported.",
+    ):
+        gpu, cuda, _vram = sc._detect_gpu_requirement(text)
+        assert gpu is False, text
+        assert cuda is False, text
+
+
+def test_merge_ors_gpu_flags():
+    # LLM missed the GPU requirement; regex caught it -> merged must keep it.
+    llm = sc.SystemRequirements(ram_min_gb=16.0, source="llm")
+    rgx = sc.SystemRequirements(gpu_required=True, gpu_cuda_required=True,
+                                gpu_vram_min_gb=14.7, source="regex")
+    merged = sc._merge_requirements(llm, rgx)
+    assert merged.gpu_required is True
+    assert merged.gpu_cuda_required is True
+    assert merged.gpu_vram_min_gb == 14.7
+    assert merged.ram_min_gb == 16.0
+
+
+def test_merge_takes_smaller_minimums():
+    a = sc.SystemRequirements(ram_min_gb=16.0, disk_min_gb=50.0)
+    b = sc.SystemRequirements(ram_min_gb=8.0, disk_min_gb=100.0)
+    merged = sc._merge_requirements(a, b)
+    assert merged.ram_min_gb == 8.0   # least aggressive warning
+    assert merged.disk_min_gb == 50.0
+
+
+def test_skyreels_style_gpu_repo_is_incompatible_on_non_cuda_machine():
+    """End-to-end: a GPU/VRAM repo must be flagged on a CUDA-less machine
+    (the bug: it silently 'passed')."""
+    text = (
+        "Single-GPU & Multi-GPU Inference. The 1.3B model requires approximately "
+        "14.7GB peak VRAM.\n"
+        'pipe = pipe.to("cuda")\n'
+    )
+    req = sc._extract_regex(text)
+    assert req is not None and req.gpu_required and req.gpu_cuda_required
+    hw = sc.HardwareInfo(
+        os_name="Windows 10", os_arch="x86_64", cpu_cores=4, cpu_model="x",
+        ram_gb=7.0, disk_free_gb=100.0,
+        gpu_model="Intel(R) HD Graphics 3000", gpu_cuda_capable=False,
+    )
+    report = sc.check_compatibility(hw, req)
+    assert report.compatible is False
+    gpu = next(c for c in report.checks if c.name == "GPU")
+    assert gpu.status == "error"

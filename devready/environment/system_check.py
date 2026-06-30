@@ -343,23 +343,61 @@ def extract_requirements(
     ``config`` is needed for the LLM path (``Config`` from ``devready.config``).
     ``detections`` is a ``List[DetectionResult]`` with language/framework info.
     """
-    # Try LLM first. If it returns something concrete, use it; otherwise fall
-    # through to the regex fallback (the LLM may be rate-limited or return an
-    # empty result when the README actually has requirements the regex can catch).
+    # Run BOTH the LLM and the regex extractor and MERGE them. Using only one or
+    # the other is fragile: the LLM may miss a GPU/VRAM requirement that the
+    # regex catches (or vice versa), and an either-or short-circuit would let
+    # that requirement pass silently — exactly the failure where a GPU-only
+    # project "passes" the check on a machine with no GPU.
+    llm_req: Optional[SystemRequirements] = None
     if config is not None and config.llm.is_configured and readme_text.strip():
         llm_result = _extract_llm(readme_text, config, detections)
         if llm_result is not None:
-            req = _dict_to_requirements(llm_result)
-            if req.has_any:
-                req.source = "llm"
-                return req
+            cand = _dict_to_requirements(llm_result)
+            if cand.has_any:
+                llm_req = cand
 
-    regex_result = _extract_regex(readme_text)
-    if regex_result is not None:
-        regex_result.source = "regex"
-        return regex_result
+    regex_req = _extract_regex(readme_text)
+    if regex_req is not None:
+        regex_req.source = "regex"
 
-    return SystemRequirements(source="none")
+    merged = _merge_requirements(llm_req, regex_req)
+    return merged if merged is not None else SystemRequirements(source="none")
+
+
+def _min_opt(*vals) -> Optional[float]:
+    """Smallest of the non-None values, or None. Used to merge minimum
+    requirements without over-stating them (warnings, not blocks)."""
+    present = [v for v in vals if v is not None]
+    return min(present) if present else None
+
+
+def _merge_requirements(
+    llm: Optional[SystemRequirements],
+    regex: Optional[SystemRequirements],
+) -> Optional[SystemRequirements]:
+    """Combine LLM and regex requirements. GPU/CUDA flags are OR-ed (trust
+    either source so a real requirement one missed is never dropped); numeric
+    minimums take the smaller value (least aggressive warning); text fields
+    prefer the LLM."""
+    if llm is None and regex is None:
+        return None
+    if llm is None:
+        return regex
+    if regex is None:
+        return llm
+
+    merged = SystemRequirements()
+    merged.os_names = llm.os_names or regex.os_names
+    merged.cpu_arch = llm.cpu_arch or regex.cpu_arch
+    merged.cpu_min_cores = _as_int(_min_opt(llm.cpu_min_cores, regex.cpu_min_cores))
+    merged.ram_min_gb = _min_opt(llm.ram_min_gb, regex.ram_min_gb)
+    merged.disk_min_gb = _min_opt(llm.disk_min_gb, regex.disk_min_gb)
+    merged.gpu_required = llm.gpu_required or regex.gpu_required
+    merged.gpu_cuda_required = llm.gpu_cuda_required or regex.gpu_cuda_required
+    merged.gpu_vram_min_gb = _min_opt(llm.gpu_vram_min_gb, regex.gpu_vram_min_gb)
+    merged.notes = llm.notes or regex.notes
+    merged.source = "llm+regex"
+    return merged
 
 
 def _extract_llm(
@@ -380,6 +418,84 @@ def _extract_llm(
         f"README excerpt:\n{excerpt}\n"
     )
     return ask_llm_json(config, _REQUIREMENTS_SYSTEM_PROMPT, user_prompt)
+
+
+# Phrases that say a GPU is OPTIONAL or that the project runs on CPU. These
+# OVERRIDE GPU-requirement signals, so a project that works fine on CPU is never
+# flagged as needing a GPU.
+_GPU_OPTIONAL_RE = re.compile(
+    r"no\s+gpu\s+(is\s+)?(required|needed)"
+    r"|gpu\s+is\s+optional|optional\s+gpu|gpu\s*\(optional\)"
+    r"|without\s+(a\s+)?gpu|does\s+not\s+require\s+(a\s+)?gpu"
+    r"|cpu[\s-]?only|gpu\s+not\s+required"
+    r"|runs?\s+(fine\s+|well\s+)?on\s+(a\s+|the\s+)?cpu"
+    r"|works?\s+(fine\s+|well\s+)?on\s+(a\s+|the\s+)?cpu"
+    r"|cpu\s+is\s+(also\s+)?supported",
+    re.IGNORECASE,
+)
+
+
+def _detect_gpu_requirement(text: str) -> Tuple[bool, bool, Optional[float]]:
+    """Decide whether a project genuinely needs a GPU / CUDA-capable GPU.
+
+    Returns ``(gpu_required, cuda_required, vram_min_gb)``.
+
+    This is deliberately signal-based rather than keyword-based. A single
+    passing mention of "CUDA"/"NVIDIA" must NOT mark a project as GPU-required
+    (that wrongly blocks non-NVIDIA machines), but a project that clearly needs
+    a GPU — it states a VRAM figure, advertises GPU/multi-GPU inference, ships
+    CUDA install instructions, or runs everything through ``.to("cuda")`` — MUST
+    be flagged so the user is warned before a long, doomed install. ``text`` is
+    expected to be lower-cased.
+    """
+    # --- stated VRAM / GPU-memory figure (very strong: only GPUs have VRAM) ---
+    vram_values: List[float] = []
+    for pat in (
+        r"(\d+(?:\.\d+)?)\s*gb\b[^.\n]{0,30}?(?:vram|gpu\s+memory)",
+        r"(?:vram|gpu\s+memory)[^.\n]{0,30}?(\d+(?:\.\d+)?)\s*gb\b",
+    ):
+        for m in re.finditer(pat, text):
+            try:
+                vram_values.append(float(m.group(1)))
+            except (ValueError, TypeError):
+                pass
+    # Use the SMALLEST stated figure — the entry barrier (smallest model variant).
+    vram_min = min(vram_values) if vram_values else None
+
+    # --- explicit GPU-requirement phrasing ---
+    explicit_gpu = bool(re.search(
+        r"requires?\s+(a\s+|an\s+)?(cuda[- ]?capable\s+)?(nvidia\s+)?gpu"
+        r"|gpus?\s+(is|are)\s+required"
+        r"|(single|multi)[\s-]?gpu\s+(inference|training)"
+        r"|requires?\s+(a\s+)?graphics\s+card",
+        text,
+    ))
+
+    # --- CUDA-specific signals (NVIDIA ecosystem), scored cumulatively ---
+    cuda_score = 0
+    if re.search(r"requires?\s+(a\s+)?cuda|cuda\s+is\s+required", text):
+        cuda_score += 3
+    if re.search(r"cuda\s+(toolkit|\d+(?:\.\d+)+|>=\s*\d)", text):     # "cuda 11.8", "cuda toolkit"
+        cuda_score += 1
+    if re.search(r"(?:index-url|download/whl|/whl/)\S*cu\d{2,3}", text):  # torch cuXXX wheels
+        cuda_score += 2
+    if re.search(r"nvidia\s+(driver|gpu|a100|h100|rtx|tesla|v100|cuda)", text):
+        cuda_score += 1
+    cuda_code = len(re.findall(
+        r"""\.to\(\s*["']cuda|\.cuda\(\)|device\s*=\s*["']cuda""", text
+    ))
+    if cuda_code >= 1:
+        cuda_score += 1
+    if cuda_code >= 3:
+        cuda_score += 1
+
+    # An explicit "GPU is optional / runs on CPU" statement wins outright.
+    if _GPU_OPTIONAL_RE.search(text):
+        return (False, False, vram_min)
+
+    gpu_required = explicit_gpu or vram_min is not None or cuda_score >= 3
+    cuda_required = gpu_required and (cuda_score >= 2 or vram_min is not None)
+    return (gpu_required, cuda_required, vram_min)
 
 
 def _extract_regex(readme_text: str) -> Optional[SystemRequirements]:
@@ -449,33 +565,16 @@ def _extract_regex(readme_text: str) -> Optional[SystemRequirements]:
             req.cpu_arch = arch
             break
 
-    # GPU — only flag as REQUIRED on explicit phrasing. A passing mention of
-    # "CUDA" or "NVIDIA" (very common in AI READMEs: "tested on", "CUDA optional",
-    # install hints) must NOT mark the project as needing a GPU, or every such
-    # repo would be wrongly blocked on a non-NVIDIA machine.
-    if re.search(
-        r"(requires?\s+(a\s+)?(cuda[- ]?capable\s+)?(nvidia\s+)?gpu"
-        r"|gpu\s+is\s+required|a\s+gpu\s+is\s+required)",
-        text,
-    ):
-        req.gpu_required = True
-    if re.search(
-        r"(requires?\s+(a\s+)?cuda|cuda\s+is\s+required|cuda[- ]?capable\s+gpu\s+(is\s+)?required)",
-        text,
-    ):
-        req.gpu_required = True
-        req.gpu_cuda_required = True
-    vram_match = re.search(
-        r"(?:minimum|requires?|recommends?)\s*(?:at\s+least\s+)?"
-        r"(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?vram",
-        text,
-    )
-    if not vram_match:
-        vram_match = re.search(
-            r"(?:^|\s)(\d+(?:\.\d+)?)\s*gb?\s*(?:of\s+)?vram", text,
-        )
-    if vram_match:
-        req.gpu_vram_min_gb = float(vram_match.group(1))
+    # GPU / CUDA — use signal-based detection (see _detect_gpu_requirement).
+    # This must catch genuine ML/inference projects (stated VRAM, "GPU
+    # inference", multi-GPU, CUDA install instructions, many `.to("cuda")`
+    # calls) WITHOUT firing on a passing mention of CUDA or on projects that
+    # say a GPU is optional / CPU is supported.
+    gpu_req, cuda_req, vram_min = _detect_gpu_requirement(text)
+    req.gpu_required = gpu_req
+    req.gpu_cuda_required = cuda_req
+    if vram_min is not None:
+        req.gpu_vram_min_gb = vram_min
 
     # Notes — capture requirement lines
     notes: List[str] = []
@@ -738,7 +837,7 @@ def print_report(report: CompatibilityReport) -> None:
             req_lines.append(f"[bold]Notes:[/bold] {req.notes}")
 
         if req_lines:
-            source_label = "AI" if req.source == "llm" else "regex"
+            source_label = "AI" if "llm" in req.source else "regex"
             panel_title = f"[bold]Project Requirements[/bold] — extracted via {source_label}"
             console.print(Panel.fit(
                 "\n".join(req_lines),
@@ -776,10 +875,18 @@ def print_report(report: CompatibilityReport) -> None:
 
     # Overall verdict
     console.print()
-    if report.compatible:
+    has_warnings = any(c.status == "warning" for c in report.checks)
+    if report.compatible and not has_warnings:
         console.print(
             "  [success]✓ System check passed — your machine meets the project's "
             "requirements.[/success]"
+        )
+    elif report.compatible and has_warnings:
+        console.print(
+            "  [warning]⚠ System check passed with warnings — review the items "
+            "marked ⚠ above.[/warning]"
+            "\n  [muted]The install will still run; the project may be slower or "
+            "need smaller settings on this machine.[/muted]"
         )
     else:
         console.print(
