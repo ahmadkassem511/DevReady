@@ -319,7 +319,10 @@
       document.getElementById("d-check-result").innerHTML = "";
       document.getElementById("d-check-result").classList.remove("warn", "hidden");
       const inst = document.getElementById("d-install");
-      inst.textContent = "Install"; inst.disabled = false; inst.onclick = () => startInstall(p.repo);
+      // Install always runs the compatibility check first; it only auto-starts
+      // when the machine is fully compatible, otherwise it asks Continue/Exit.
+      inst.textContent = "Install"; inst.disabled = false;
+      inst.onclick = () => checkHardware(p, { installOnPass: true });
       const hw = document.getElementById("d-check-hw");
       hw.textContent = "Check Hardware"; hw.disabled = false; hw.onclick = () => checkHardware(p);
       // "Continue Anyway" is removed on every modal open
@@ -351,13 +354,20 @@
       try { new Notification(title, { body, icon: "/static/favicon.ico" }); } catch (_) {}
     }
 
-    async function checkHardware(p) {
+    // Run the hardware/compatibility check. When `installOnPass` is true (the
+    // Install button uses this as a gate), a clean result starts the install
+    // immediately; anything less than clean STOPS and asks the user to confirm
+    // (Continue) or back out (Exit) — it never installs automatically on an
+    // incompatible machine. When false (the explicit "Check Hardware" button),
+    // it just shows the report.
+    async function checkHardware(p, { installOnPass = false } = {}) {
       const resultEl = document.getElementById("d-check-result");
       const hwBtn = document.getElementById("d-check-hw");
       const instBtn = document.getElementById("d-install");
 
-      hwBtn.disabled = true; hwBtn.textContent = "Checking…";
+      hwBtn.disabled = true;
       instBtn.disabled = true;
+      if (installOnPass) instBtn.textContent = "Checking…"; else hwBtn.textContent = "Checking…";
       resultEl.innerHTML = `<div class="muted">Checking your system against the project requirements…</div>`;
       resultEl.className = "";
 
@@ -370,18 +380,21 @@
         });
       } catch (e) {
         hwBtn.disabled = false; hwBtn.textContent = "Check Hardware";
-        instBtn.disabled = false;
+        instBtn.disabled = false; instBtn.textContent = "Install";
         resultEl.innerHTML = `<div class="warn">✗ Check failed: ${esc("" + e)}</div>`;
         return;
       }
 
-      hwBtn.textContent = "Re-check";
-      hwBtn.disabled = false;
+      hwBtn.textContent = "Re-check"; hwBtn.disabled = false;
+      instBtn.textContent = "Install";
 
       const allChecks = data.checks || [];
       const hasWarnings = allChecks.some(c => c.status === "warning");
 
       if (data.compatible && !hasWarnings) {
+        // Clean pass — safe to install. If the Install button triggered this,
+        // go straight into the install; otherwise just confirm it's good.
+        if (installOnPass) { startInstall(p.repo); return; }
         resultEl.innerHTML = `<div style="background:rgba(63,185,80,.12);border:1px solid var(--green);color:var(--green);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">✓ Your system meets the project's requirements.</div>`;
         instBtn.disabled = false;
         _sendNotification(p.name, "Your system meets the requirements.");
@@ -389,7 +402,7 @@
       }
 
       // Either incompatible, or compatible-with-warnings: show the full report
-      // so nothing (e.g. a GPU/VRAM shortfall) is hidden behind a green tick.
+      // and STOP for an explicit decision — never proceed automatically.
       const checks = allChecks.map(c =>
         `<tr><td>${esc(c.name)}</td><td>${c.status === "error" ? "✗" : c.status === "warning" ? "⚠" : "✓"}</td><td>${esc(c.current)}</td><td>${esc(c.required)}</td><td>${esc(c.message)}</td></tr>`
       ).join("");
@@ -404,10 +417,10 @@
 
       const banner = data.compatible
         ? `<div style="background:rgba(210,153,34,.14);border:1px solid var(--yellow,#d29922);color:var(--yellow,#d29922);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">
-             <b>⚠ Your system can run the install, but may not run the app well.</b> Review the warnings below.
+             <b>⚠ Your system can run the install, but may not run the app well.</b> Review the warnings below, then choose.
            </div>`
         : `<div style="background:rgba(248,81,73,.12);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:8px;font-size:13px;margin:12px 0;">
-             <b>✗ Your machine doesn't meet the project's requirements.</b> You can still try — it may install but fail to run.
+             <b>✗ Your machine doesn't meet the project's requirements.</b> It may install but fail to run. Continue anyway, or exit?
            </div>`;
 
       resultEl.innerHTML = `
@@ -419,14 +432,17 @@
         </table>
         <div class="row">
           <button class="btn" id="d-continue">${data.compatible ? "Install Anyway" : "Continue Anyway"}</button>
+          <button class="btn secondary" id="d-exit">Exit — don't install</button>
         </div>`;
       instBtn.disabled = true;
-      // Wire up the continue button after inserting into DOM
+      // Wire up the decision buttons after inserting into DOM.
       const cont = document.getElementById("d-continue");
       if (cont) cont.onclick = () => startInstall(p.repo);
+      const exit = document.getElementById("d-exit");
+      if (exit) exit.onclick = () => closeOverlay();
       _sendNotification(p.name, data.compatible
-        ? "Your system meets the minimum, with warnings. Click to review."
-        : "Your system may not meet the requirements. Click to review.");
+        ? "Compatible with warnings — confirm to install, or exit."
+        : "⚠ Your system may not run this project — confirm to continue, or exit.");
     }
     function closeOverlay() { document.getElementById("overlay").classList.remove("open"); }
 
@@ -518,7 +534,12 @@
     function installCustom() {
       const url = document.getElementById("custom-url").value.trim();
       if (!url) return;
-      startInstall(url);
+      // Open the modal with a minimal project and gate through the same
+      // compatibility check as catalog installs (Continue/Exit on a mismatch).
+      const name = (url.split("/").filter(Boolean).pop() || "project").replace(/\.git$/, "");
+      const p = { repo: url, name, language: "", description: "Custom GitHub repository (installed from URL)." };
+      openDetail(p);
+      checkHardware(p, { installOnPass: true });
     }
 
     // --- library / control panel ---
