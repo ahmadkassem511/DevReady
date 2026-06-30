@@ -46,18 +46,19 @@ door — see [For non-technical users](#for-non-technical-users--the-easy-app) a
 ## What it does
 
 When you run `devready start` in a freshly cloned project, it walks through
-eight steps:
+nine steps:
 
 | Step | What happens |
 |------|--------------|
 | 1. **Detect & plan** | Scans for `package.json`, `requirements.txt`, `pyproject.toml`, etc. to identify languages, frameworks, and required versions — then prints a **plan** showing what the project needs vs. what's installed, and what DevReady will set up, *before* it changes anything. (Run `devready doctor` any time to see this plan without starting.) |
 | 2. **Read the README** | Uses a **free** LLM (via OpenRouter) — or an offline parser — to extract install commands, system packages, env vars, and DB steps. If the chosen free model is rate-limited or retired, DevReady automatically tries others and even queries OpenRouter's live model list to find a working free one. |
-| 3. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`choco`, with your permission. Cleans up README-style names (`Node.js 18+` → `nodejs`) and skips language runtimes — those are handled per-project in step 4. |
-| 4. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. **If a required tool or toolchain isn't installed, DevReady installs it for you and continues** — the runner (`make`/`just`/`task`), Node (via the package manager; `yarn`/`pnpm` provisioned through corepack), or a missing language toolchain (Rust, Go, Ruby, PHP, Java/Maven/Gradle, .NET) via `brew`/`apt`/`choco`/etc. Otherwise it does language-native setup: Python (correct version via [uv](https://github.com/astral-sh/uv) + isolated `.venv` + pip), Node (picks `npm`/`yarn`/`pnpm` from the lockfile), Rust (`cargo build`), Go (`go mod download`), Ruby (`bundle install`), PHP (`composer install`), Java (Maven/Gradle), .NET (`dotnet restore`). **Monorepos** are handled too — sub-projects in subdirectories (e.g. a `frontend/` Node app) are detected and set up as well. |
-| 5. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
-| 6. **Services** | If a `docker-compose.yml` exists (and Docker is running), offers to start the services. |
-| 7. **Migrations** | Detects and runs migrations (Django, Alembic, Knex…). |
-| 8. **Launch** | Picks the right start command for the framework (Streamlit, Django, FastAPI, Flask, or your npm `dev`/`start` script), **waits until the server actually responds**, then prints and opens the URL — e.g. `http://localhost:8501`. **Monorepos** start every component together (e.g. backend on 8000 + frontend on 3000). For CLI/library/pipeline projects with no web server, it instead shows you how to run it. |
+| 3. **Check compatibility** | Detects your hardware (CPU cores, RAM, free disk, GPU) and compares it against the requirements it read from the README. A **truly required** but missing GPU (e.g. the project explicitly needs a CUDA-capable card) is flagged before you waste time installing; low RAM or few cores are shown as **warnings**, not blocks. CUDA is only treated as required on explicit phrasing — a passing mention of "tested on NVIDIA" or "CUDA optional" won't wrongly block a non-NVIDIA machine. In the GUI there's a **Check Hardware** button and a **Continue Anyway** option. |
+| 4. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`winget`/`scoop`/`choco`, with your permission. Cleans up README-style names (`Node.js 18+` → `nodejs`) and skips language runtimes — those are handled per-project in step 5. Package-manager choice is **elevation-aware** (prefers no-admin managers like winget/scoop, and only uses choco when running elevated, so it never hangs on an admin prompt). |
+| 5. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. **If a required tool or toolchain isn't installed, DevReady installs it for you and continues** — the runner (`make`/`just`/`task`), Node (via the package manager; `yarn`/`pnpm` provisioned through corepack), or a missing language toolchain (Rust, Go, Ruby, PHP, Java/Maven/Gradle, .NET) via `brew`/`apt`/`choco`/etc. Otherwise it does language-native setup: Python (correct version via [uv](https://github.com/astral-sh/uv) + isolated `.venv` + pip), Node (picks `npm`/`yarn`/`pnpm` from the lockfile), Rust (`cargo build`), Go (`go mod download`), Ruby (`bundle install`), PHP (`composer install`), Java (Maven/Gradle), .NET (`dotnet restore`). Git **submodules** are initialised, and **monorepos** are handled too — sub-projects in subdirectories (e.g. a `frontend/` Node app) are detected and set up as well. When a step fails, the **self-healing loop** kicks in (see below). |
+| 6. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
+| 7. **Services** | If a `docker-compose.yml` exists, DevReady ensures a **container runtime** is available (Docker Desktop, or a Podman fallback) and starts the services — auto-selecting a Compose **profile** when every service is profile-gated. |
+| 8. **Migrations** | Detects and runs migrations (Django, Alembic, Knex, Prisma, Rails, Laravel…) with the project's `.env` loaded. |
+| 9. **Launch** | Picks the right start command for the framework (Streamlit, Django, FastAPI, Flask, or your npm `dev`/`start` script), **waits until the server actually responds** (polling HTTP for up to 90s for slow first-compile frameworks like Next.js), then prints and opens the URL — e.g. `http://localhost:8501`. **Monorepos** start every component together (e.g. backend on 8000 + frontend on 3000). For CLI/library/pipeline projects with no web server, it instead shows you how to run it. |
 
 Every step is **non-destructive and asks before changing your system** where it
 matters (use `--yes` to accept all prompts for unattended runs). DevReady is
@@ -78,7 +79,7 @@ easy to reason about:
    data (install commands, system packages, env vars, DB steps). It prefers a
    free LLM via OpenRouter and falls back to a built-in offline regex parser, so
    it always works — even with no API key and no network.
-3. **The engine** runs the eight steps in order, choosing the right action per
+3. **The engine** runs the nine steps in order, choosing the right action per
    stage: it prefers the project's *own* setup method (Makefile/Docker/scripts)
    when one exists, and otherwise runs the language-native setup, picking the
    correct runtime version **isolated per project** so nothing leaks between
@@ -93,6 +94,34 @@ easy to reason about:
 Two rules hold everywhere: **all side effects go through one safe command
 runner**, and **anything that changes your machine or runs repo-provided code
 asks first** (unless you pass `--yes`).
+
+## Self-healing & resilience
+
+Real installs fail in messy ways. Instead of stopping at the first error,
+DevReady tries to **diagnose and fix it, then continue** — the goal is to get
+as many projects as possible all the way to a running state without you
+touching the keyboard:
+
+- **Deterministic retries first.** Common, well-understood failures are fixed
+  offline with no AI call — e.g. routing a `pip`/`python` fix into the project's
+  `.venv` interpreter (not your global Python), or resolving Windows `.cmd`/`.bat`
+  shims and Git Bash (avoiding the `System32` WSL stub that breaks `bash`).
+- **Resilient dependency installs.** If a single unbuildable package (say
+  `flash-attn` or another GPU/CUDA-only wheel on a CPU machine) would otherwise
+  fail an entire `requirements.txt`, DevReady drops just the offender and
+  reinstalls the rest, so the project still comes up.
+- **LLM-assisted healing as a fallback.** When deterministic fixes don't apply,
+  DevReady can ask the free LLM for a structured fix, run it through a strict
+  **allowlist/denylist safety check**, and retry the step. Destructive or
+  out-of-scope commands are never executed.
+- **Container runtime, automatically.** If a project needs Docker and it isn't
+  installed, DevReady offers to install **Docker Desktop** (or fall back to
+  **Podman**) and wires up a `docker`→`podman` shim so Compose still works. The
+  GUI shows an **Install Docker** banner when a reboot/admin step is required.
+- **Honest about hard limits.** Some things can't be made zero-touch — a repo
+  pinned to a deleted submodule commit, a GPU-only dependency on a CPU box, or
+  Docker needing admin + reboot on Windows. DevReady does the maximum it safely
+  can and then **tells you plainly** what's left and why.
 
 ## Installation (developers / CLI)
 
@@ -153,7 +182,7 @@ cd project
 devready start
 ```
 
-That's it. DevReady prints a detection summary, walks the eight steps, and
+That's it. DevReady prints a detection summary, walks the nine steps, and
 launches the app.
 
 ## For non-technical users — the easy app
@@ -395,10 +424,15 @@ devready/
 │   └── __init__.py        #   Registry + detect_stack() entry point.
 ├── environment/           # "How do we set it up?"
 │   ├── strategies.py      #   Detect the project's OWN setup method (make/task/just/script).
-│   ├── system_deps.py     #   Install OS packages (brew/apt/choco) with consent.
+│   ├── system_deps.py     #   Install OS packages + container runtime (Docker/Podman), elevation-aware.
+│   ├── system_check.py    #   Pre-install hardware compatibility check (CPU/RAM/disk/GPU vs README).
+│   ├── services.py        #   Detect & provision backing services (DBs, etc.) via containers.
 │   ├── version_manager.py #   Resolve per-project Python version (reuse or uv), create venvs, run installs.
 │   └── env_vars.py        #   Generate a .env with safe dev defaults.
 ├── ai/
+│   ├── client.py          #   Thin OpenRouter client (free-model fallback + JSON asks).
+│   ├── guide.py           #   Per-project run guidance (how to use a non-web/CLI project).
+│   ├── healer.py          #   Self-healing install loop: deterministic retries + safe LLM fixes.
 │   └── readme_parser.py   # LLM (OpenRouter) + offline regex fallback. Same output shape.
 └── web/                   # The optional browser GUI ("devready ui").
     ├── server.py          #   FastAPI app + security middleware (token/host/origin).
@@ -445,7 +479,8 @@ offline.
   handles Python and fnm/corepack now handle Node — DevReady already
   auto-installs the toolchains themselves and honours pinned Node + pnpm/yarn
   versions; this extends exact-version pinning to the remaining languages.
-- Richer migration detection (Prisma, TypeORM, Flyway, EF Core).
+- Richer migration detection — Django, Alembic, Knex, **Prisma**, Rails, and
+  Laravel are supported today; next up: TypeORM, Flyway, EF Core.
 
 ## License
 
