@@ -464,12 +464,31 @@ class Engine:
         if not subprojects:
             return
 
+        root_is_js_ws = self._root_is_js_workspace()
         console.print(f"  Found [bold]{len(subprojects)}[/bold] sub-project(s) inside this repo:")
         for subdir, results in subprojects:
             rel = subdir.relative_to(self.project_dir).as_posix()
-            langs = ", ".join(r.language for r in results)
+
+            # Node workspace members (pnpm/yarn/npm workspaces) are already
+            # installed by the SINGLE root package-manager install. Re-installing
+            # them one-by-one is redundant and, with npm, fails outright on the
+            # `workspace:` protocol — so drop those detections here.
+            effective = []
+            for det in results:
+                if (root_is_js_ws and det.language == "Node.js"
+                        and (subdir / "package.json").exists()):
+                    console.print(
+                        f"    [muted]{rel}: part of the workspace — already installed "
+                        f"by the root install; skipping its own Node install.[/muted]"
+                    )
+                    continue
+                effective.append(det)
+            if not effective:
+                continue
+
+            langs = ", ".join(r.language for r in effective)
             # Skip if this subproject uses a language that already failed at root
-            sub_languages = {r.language for r in results}
+            sub_languages = {r.language for r in effective}
             if sub_languages & self._failed_languages:
                 console.print(
                     f"    [warning]{rel} uses [bold]{', '.join(sorted(sub_languages & self._failed_languages))}[/bold] "
@@ -480,7 +499,7 @@ class Engine:
                 console.print(f"    [muted]Skipped {rel}.[/muted]")
                 continue
             sub_healer = self._make_healer(subdir)
-            for det in results:
+            for det in effective:
                 console.print(f"    Setting up {rel} ([bold]{det.language}[/bold])…")
                 outcomes = version_manager.setup_environment(subdir, det, sub_healer)
                 # A sub-project failure is reported but doesn't block the root
@@ -506,6 +525,24 @@ class Engine:
             if results:
                 found.append((child, results))
         return found
+
+    def _root_is_js_workspace(self) -> bool:
+        """True if the repo root declares a JS monorepo workspace (pnpm/yarn/npm).
+
+        In a workspace, ONE install at the root wires up every member package, so
+        members must not be installed individually — and npm can't install a
+        member that uses the ``workspace:`` dependency protocol at all.
+        """
+        if (self.project_dir / "pnpm-workspace.yaml").exists():
+            return True
+        root_pkg = self.project_dir / "package.json"
+        if root_pkg.exists():
+            try:
+                data = json.loads(root_pkg.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            return bool(data.get("workspaces"))
+        return False
 
     def _try_project_setup(self) -> bool:
         """Offer to run the project's own setup method, if it has one.

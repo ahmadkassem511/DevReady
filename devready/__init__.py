@@ -11,6 +11,6 @@ The public version string is read by ``devready --version``.
 
 # Single source of truth for the version. Keep this in sync with the version
 # declared in pyproject.toml when you cut a release.
-__version__ = "0.21.1"
+__version__ = "0.21.2"
 
 __all__ = ["__version__"]
