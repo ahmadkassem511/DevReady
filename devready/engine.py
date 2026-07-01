@@ -649,7 +649,19 @@ class Engine:
                 console.print("  [success]Services started.[/success]")
                 self._write_state(docker=True)
                 return
-            console.print("  [error]Failed to start services.[/error]")
+            console.print(
+                "  [error]Failed to start services.[/error] "
+                "The Docker build or image pull didn't finish — most often a slow or "
+                "unstable network timing out while downloading images/packages, a "
+                "missing value in [bold].env[/bold], or a registry needing "
+                "[bold]docker login[/bold]."
+            )
+            console.print(
+                "  [muted]Docker keeps every build layer it already completed, so "
+                "re-running [bold]devready start[/bold] resumes from where it stopped "
+                "instead of starting over — worth a retry if the network was the "
+                "issue. Check the build output above for the failing step.[/muted]"
+            )
             return
 
         # No compose file, but the project talks to a database/cache — provision
@@ -963,17 +975,18 @@ class Engine:
                     return None
                 break  # exited cleanly — likely a detached launcher; check the port
 
-        # Prefer the port the server actually announces in its log over our guess.
-        announced = self._detect_port_from_log(log_path, port)
         # If the launcher already exited cleanly and we did NOT expect a detached
         # server, it was a one-shot task (a build) — don't block on a port.
         effective_timeout = port_timeout
         if process.poll() is not None and not expect_detached:
             effective_timeout = min(port_timeout, 5)
 
-        reachable_port = None
-        if announced and self._wait_for_port(announced, timeout=effective_timeout, label=name):
-            reachable_port = announced
+        # Wait for the server, continuously re-reading its log so we lock onto the
+        # port it ACTUALLY announces (e.g. Vite on 5173) instead of our initial
+        # guess — even when that URL is printed a few seconds after launch.
+        reachable_port, announced = self._wait_for_announced_port(
+            log_path, guess=port, timeout=effective_timeout, label=name,
+        )
         return {
             "name": name,
             "pid": process.pid,
@@ -983,14 +996,53 @@ class Engine:
             "cwd": cwd,
         }
 
+    def _wait_for_announced_port(
+        self,
+        log_path: Path,
+        guess: Optional[int],
+        timeout: int,
+        label: Optional[str] = None,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Wait until the server accepts a TCP connection, re-scanning its log for
+        the real port as it appears. Polls both the announced port and our guess.
+
+        Returns ``(reachable_port, announced_port)`` — ``reachable_port`` is set
+        only when a port actually answered.
+        """
+        deadline = time.time() + max(timeout, 1)
+        next_notice = time.time() + 20
+        announced = self._detect_port_from_log(log_path, guess)
+        while True:
+            announced = self._detect_port_from_log(log_path, announced or guess)
+            # Try the announced port first, then fall back to the guess.
+            for candidate in dict.fromkeys(p for p in (announced, guess) if p):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(1)
+                    if sock.connect_ex(("127.0.0.1", candidate)) == 0:
+                        return candidate, (announced or candidate)
+            if time.time() >= deadline:
+                return None, announced
+            if label and time.time() >= next_notice:
+                remaining = max(0, int(deadline - time.time()))
+                console.print(
+                    f"  [muted]…still waiting for {label} to come up "
+                    f"(up to ~{remaining}s more)…[/muted]"
+                )
+                next_notice = time.time() + 20
+            time.sleep(0.5)
+
     # URLs/ports a dev server prints when it starts (vite, next, CRA, flask…).
     _LOG_URL_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})")
     _LOG_PORT_RE = re.compile(r"(?:port|listening on|running at|running on)\D{0,15}?(\d{2,5})", re.IGNORECASE)
+    # ANSI SGR colour codes (e.g. \x1b[1m) — modern dev servers like Vite wrap
+    # their URL in them, so "localhost:\x1b[1m5173" would otherwise defeat the
+    # port regex and make a perfectly-running server look like it never started.
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
     def _detect_port_from_log(self, log_path: Path, fallback: Optional[int]) -> Optional[int]:
         """Find the port a launched server announced in its log, else the fallback."""
         try:
-            text = log_path.read_text(encoding="utf-8", errors="replace")
+            text = self._ANSI_RE.sub("", log_path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             return fallback
         match = self._LOG_URL_RE.search(text) or self._LOG_PORT_RE.search(text)
@@ -1052,12 +1104,24 @@ class Engine:
                     except webbrowser.Error:
                         pass
             elif announced:
-                # Process is alive but nothing is listening yet — be honest.
-                console.print(
-                    f"  [warning]• {name} started but isn't serving on port {announced} yet.[/warning]\n"
-                    f"  [muted]It may still be building (some dev servers take a few minutes) or "
-                    f"it serves on a different port. Recent output:[/muted]"
-                )
+                # Process is alive but nothing is listening yet — be honest about
+                # WHY. If it's blocked on a one-time interactive setup (onboarding
+                # /login), it will never bind a port on its own; say so instead of
+                # implying it's "still building".
+                if self._needs_interactive_setup(log_path):
+                    console.print(
+                        f"  [warning]• {name} needs a one-time interactive setup "
+                        f"(onboarding/login) before it can serve — it won't come up "
+                        f"on its own.[/warning]\n"
+                        f"  [muted]Run that step in your terminal (see the guide below "
+                        f"and the recent output), then re-run.[/muted]"
+                    )
+                else:
+                    console.print(
+                        f"  [warning]• {name} started but isn't serving on port {announced} yet.[/warning]\n"
+                        f"  [muted]It may still be building (some dev servers take a few minutes) or "
+                        f"it serves on a different port. Recent output:[/muted]"
+                    )
                 self._print_log_tail(log_path, lines=12)
             else:
                 # A CLI / worker with no web URL — alive is success.
@@ -1095,6 +1159,27 @@ class Engine:
                 line = text[line_start: line_end if line_end != -1 else len(text)].strip()
                 return line[:200] if line else None
         return None
+
+    def _needs_interactive_setup(self, log_path: Path) -> bool:
+        """True if the server log shows it's waiting on a one-time interactive
+        setup (onboarding/login) that can't be automated — so it will never bind
+        its port until the user runs that step themselves."""
+        try:
+            text = self._ANSI_RE.sub("", log_path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return False
+        low = text.lower()
+        # Require a strong blocker phrase; a bare "run `" only counts alongside an
+        # onboarding/login/auth word so ordinary "run `npm ...`" hints don't trip it.
+        strong = ("interactive tty", "needs a tty", "requires a tty", "not a tty",
+                  "run the onboarding", "onboarding wizard",
+                  "not logged in", "not authenticated", "please log in",
+                  "please login", "login required", "authentication required")
+        if any(s in low for s in strong):
+            return True
+        if "onboard" in low and ("tty" in low or "interactive" in low or "automation" in low):
+            return True
+        return False
 
     @staticmethod
     def _check_response_body(url: str, log_path: Optional[Path] = None) -> Optional[str]:

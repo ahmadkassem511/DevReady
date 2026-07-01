@@ -250,6 +250,38 @@ def test_detect_port_from_log_falls_back_when_silent(tmp_path):
     assert eng._detect_port_from_log(log, fallback=8000) == 8000
 
 
+def test_needs_interactive_setup_detects_onboarding(tmp_path):
+    # openclaw's gateway prints this and never binds a port until onboarded.
+    eng = Engine(project_dir=tmp_path)
+    log = tmp_path / "run.log"
+    log.write_text(
+        "> openclaw@2026 dev\n"
+        "Onboarding needs an interactive TTY. Use `openclaw onboard "
+        "--non-interactive --accept-risk ...` for automation.\n"
+    )
+    assert eng._needs_interactive_setup(log) is True
+
+
+def test_needs_interactive_setup_false_for_ordinary_server(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    log = tmp_path / "run.log"
+    log.write_text("VITE ready\n  ->  Local: http://localhost:5173/\nrun `npm test` to test\n")
+    assert eng._needs_interactive_setup(log) is False
+
+
+def test_detect_port_from_log_strips_ansi_colours(tmp_path):
+    # Vite prints its URL wrapped in ANSI colour codes — the port must still be
+    # detected (the openclaw case, where a live 5173 server looked "not serving").
+    eng = Engine(project_dir=tmp_path)
+    log = tmp_path / "run.log"
+    log.write_text(
+        "  \x1b[32m➜\x1b[39m  \x1b[1mLocal\x1b[22m:   "
+        "\x1b[36mhttp://localhost:\x1b[1m5173\x1b[22m\x1b[36m/\x1b[39m\n",
+        encoding="utf-8",
+    )
+    assert eng._detect_port_from_log(log, fallback=3000) == 5173
+
+
 def test_scan_build_error_finds_module_not_found(tmp_path):
     eng = Engine(project_dir=tmp_path)
     log = tmp_path / "run.log"
