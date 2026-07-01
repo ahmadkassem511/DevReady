@@ -915,7 +915,7 @@ class Engine:
                 self._render_guide(guide)  # documented command didn't serve — explain
             return
 
-        targets = self._collect_launch_targets()
+        targets = self._collect_launch_targets(guide=guide)
         served = self._launch_targets(targets) if targets else []
         if served:
             return  # a web app is up and the browser was opened — that's the finish
@@ -927,19 +927,25 @@ class Engine:
         else:
             self._no_server_help()
 
-    def _collect_launch_targets(self) -> List[dict]:
+    def _collect_launch_targets(self, guide: Optional[dict] = None) -> List[dict]:
         """Find everything runnable: the root app plus any sub-project servers.
 
         Returns a list of ``{name, cwd, command, port}`` dicts. For a monorepo
         with, say, a backend and a frontend, this yields both so they start
         together. Components that aren't servers (no resolvable start command)
         are simply omitted.
+
+        When ``guide`` names a documented long-running SERVER/gateway command
+        (e.g. ``openclaw gateway run``) that the framework heuristic misses, it's
+        added as its own target so the real backend starts too.
         """
         targets: List[dict] = []
+        commands_seen = set()
 
         cmd, port = self._resolve_launch()
         if cmd:
             targets.append({"name": "root", "cwd": str(self.project_dir), "command": cmd, "port": port})
+            commands_seen.add(" ".join(cmd))
 
         # Sub-project servers (e.g. a frontend/ that has an npm dev script).
         for subdir, results in self._detect_subprojects():
@@ -950,8 +956,70 @@ class Engine:
                 targets.append(
                     {"name": subdir.name, "cwd": str(subdir), "command": sub_cmd, "port": sub_port}
                 )
+                commands_seen.add(" ".join(sub_cmd))
+
+        # A documented server/gateway/daemon the heuristic doesn't produce (e.g.
+        # `openclaw gateway run`). Runs alongside the web target so the backend
+        # comes up too; its port is discovered from the log.
+        server_argv = self._server_target_from_guide(guide)
+        if server_argv and " ".join(server_argv) not in commands_seen:
+            targets.append({
+                "name": "server",
+                "cwd": str(self.project_dir),
+                "command": server_argv,
+                "port": None,
+            })
 
         return targets
+
+    def _server_target_from_guide(self, guide: Optional[dict]) -> Optional[List[str]]:
+        """Resolve the guide's ``server_command`` into a runnable argv, or None."""
+        if not guide:
+            return None
+        cmd_str = (guide.get("server_command") or "").strip()
+        if not cmd_str:
+            return None
+        from .ai.guide import is_safe_server_command
+        if not is_safe_server_command(cmd_str):
+            return None
+        return self._resolve_server_command(cmd_str)
+
+    def _resolve_server_command(self, cmd_str: str) -> Optional[List[str]]:
+        """Turn a documented server command into an argv we can actually spawn.
+
+        Handles a project's own CLI that isn't on PATH: a root ``<name>.mjs`` /
+        ``<name>.js`` entry is run with ``node``; otherwise a Node project's bin
+        is invoked through the workspace's package manager (``pnpm exec`` for a
+        pnpm workspace, else ``npx``). Returns None when it can't be resolved.
+        """
+        parts = cmd_str.split()
+        if not parts:
+            return None
+        head = parts[0].replace("\\", "/").split("/")[-1].lower()
+        for suffix in (".exe", ".cmd", ".bat"):
+            if head.endswith(suffix):
+                head = head[: -len(suffix)]
+        rest = parts[1:]
+
+        # Already a real command on PATH (npm/node/python/make/…): run as-is.
+        if command_exists(head):
+            return parts
+
+        # A project CLI shipped as a root script → run it with node.
+        for entry in (f"{parts[0]}.mjs", f"{parts[0]}.js"):
+            if (self.project_dir / entry).exists():
+                return ["node", entry, *rest]
+
+        # A Node project's bin (installed into node_modules/.bin by the workspace
+        # install) → invoke via the workspace package manager.
+        if (self.project_dir / "package.json").exists() or self._root_is_js_workspace():
+            if command_exists("pnpm") and (
+                self._root_is_js_workspace() or (self.project_dir / "pnpm-lock.yaml").exists()
+            ):
+                return ["pnpm", "exec", *parts]
+            if command_exists("npx"):
+                return ["npx", "--no-install", *parts]
+        return None
 
     def _launch_targets(
         self, targets: List[dict], port_timeout: int = 25, expect_detached: bool = False
@@ -1230,6 +1298,14 @@ class Engine:
                         f"  [muted]It may still be building (some dev servers take a few minutes) or "
                         f"it serves on a different port. Recent output:[/muted]"
                     )
+                self._print_log_tail(log_path, lines=12)
+            elif self._needs_interactive_setup(log_path):
+                # Alive, no port — but it's blocked on a one-time interactive
+                # setup (e.g. a gateway waiting for `onboard`). Say so plainly.
+                console.print(
+                    f"  [warning]• {name} started but needs a one-time interactive "
+                    f"setup (onboarding/login) before it can serve.[/warning]"
+                )
                 self._print_log_tail(log_path, lines=12)
             else:
                 # A CLI / worker with no web URL — alive is success.

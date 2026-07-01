@@ -250,6 +250,69 @@ def test_detect_port_from_log_falls_back_when_silent(tmp_path):
     assert eng._detect_port_from_log(log, fallback=8000) == 8000
 
 
+def test_resolve_server_command_node_root_entry(tmp_path, monkeypatch):
+    # openclaw case: `openclaw` isn't on PATH, but openclaw.mjs is the entry.
+    import devready.engine as engine_mod
+    (tmp_path / "openclaw.mjs").write_text("// entry\n")
+    monkeypatch.setattr(engine_mod, "command_exists", lambda h: False)
+    eng = Engine(project_dir=tmp_path)
+    assert eng._resolve_server_command("openclaw gateway run") == [
+        "node", "openclaw.mjs", "gateway", "run",
+    ]
+
+
+def test_resolve_server_command_on_path(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    monkeypatch.setattr(engine_mod, "command_exists", lambda h: h == "myserver")
+    eng = Engine(project_dir=tmp_path)
+    assert eng._resolve_server_command("myserver serve --port 9000") == [
+        "myserver", "serve", "--port", "9000",
+    ]
+
+
+def test_resolve_server_command_pnpm_workspace_bin(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    (tmp_path / "package.json").write_text('{"name": "root"}')
+    (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - 'ui'\n")
+    monkeypatch.setattr(engine_mod, "command_exists", lambda h: h == "pnpm")
+    eng = Engine(project_dir=tmp_path)
+    assert eng._resolve_server_command("openclaw gateway run") == [
+        "pnpm", "exec", "openclaw", "gateway", "run",
+    ]
+
+
+def test_resolve_server_command_unresolvable(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    monkeypatch.setattr(engine_mod, "command_exists", lambda h: False)
+    eng = Engine(project_dir=tmp_path)
+    # No PATH match, no root .mjs/.js, no package.json -> can't resolve.
+    assert eng._resolve_server_command("openclaw gateway run") is None
+
+
+def test_collect_launch_targets_adds_server_from_guide(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    (tmp_path / "openclaw.mjs").write_text("// entry\n")
+    (tmp_path / "package.json").write_text('{"name": "root"}')
+    monkeypatch.setattr(engine_mod, "command_exists", lambda h: False)
+    eng = Engine(project_dir=tmp_path)
+    monkeypatch.setattr(eng, "_resolve_launch", lambda: (None, None))
+    monkeypatch.setattr(eng, "_detect_subprojects", lambda: [])
+    targets = eng._collect_launch_targets(guide={"server_command": "openclaw gateway run"})
+    server = next((t for t in targets if t["name"] == "server"), None)
+    assert server is not None
+    assert server["command"] == ["node", "openclaw.mjs", "gateway", "run"]
+
+
+def test_collect_launch_targets_skips_unsafe_server_command(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    monkeypatch.setattr(engine_mod, "command_exists", lambda h: False)
+    eng = Engine(project_dir=tmp_path)
+    monkeypatch.setattr(eng, "_resolve_launch", lambda: (None, None))
+    monkeypatch.setattr(eng, "_detect_subprojects", lambda: [])
+    targets = eng._collect_launch_targets(guide={"server_command": "foo && rm -rf /"})
+    assert not any(t["name"] == "server" for t in targets)
+
+
 def test_report_compose_status_lists_running_containers(tmp_path, monkeypatch):
     # After `up`, DevReady must confirm containers are actually running and show
     # them (so "nothing in Docker Desktop" is never a silent mystery).

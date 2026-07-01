@@ -30,6 +30,11 @@ GUIDE_SYSTEM_PROMPT = (
     "if there isn't one. Must be one command — no '&&', pipes, or 'cd'.\n"
     '  "url": the local URL the app serves on once started (e.g. '
     '"http://localhost:8080"), or an empty string,\n'
+    '  "server_command": if this project is primarily a long-running SERVER, '
+    "gateway, daemon, or backend service you start from the command line (NOT a "
+    'browser page) — the SINGLE command that starts that server (e.g. '
+    '"openclaw gateway run", "myapp serve", "foo start"); else an empty string. '
+    "One command only, no operators.\n"
     '  "steps": array of short, concrete, copy-pasteable steps to run or use it '
     "(include the actual commands; assume deps are already installed so do NOT "
     "include install steps),\n"
@@ -88,6 +93,7 @@ def generate_project_guide(
         "has_web_ui": bool(data.get("has_web_ui")),
         "launch_command": str(data.get("launch_command", "")).strip(),
         "url": str(data.get("url", "")).strip(),
+        "server_command": str(data.get("server_command", "")).strip(),
         "steps": steps,
         "tips": str(data.get("tips", "")).strip(),
     }
@@ -137,6 +143,23 @@ def is_safe_launch_command(command: str) -> bool:
         if head.endswith(suffix):
             head = head[: -len(suffix)]
     return head in _SAFE_LAUNCH_HEADS
+
+
+def is_safe_server_command(command: str) -> bool:
+    """Like :func:`is_safe_launch_command`, but the head may be a project-specific
+    CLI (e.g. ``openclaw``) that the engine resolves to ``node``/``pnpm``/``npx``.
+
+    We therefore skip the known-head allowlist but still reject shell chains,
+    redirections, and any destructive/pipe-to-shell tokens.
+    """
+    if not command or not command.strip():
+        return False
+    low = command.lower()
+    if any(op in command for op in _SHELL_OPERATORS):
+        return False
+    if any(tok in low for tok in _LAUNCH_FORBIDDEN):
+        return False
+    return True
 
 
 def port_from_url(url: str) -> Optional[int]:
