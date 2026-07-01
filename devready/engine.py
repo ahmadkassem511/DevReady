@@ -633,35 +633,53 @@ class Engine:
             # Also detect profiles: when every service has an explicit profiles: key,
             # Docker Compose says "no service selected" unless --profile is passed.
             env_file = self.project_dir / ".env"
-            compose_cmd = ["docker", "compose"]
+            base_cmd = ["docker", "compose"]
             if env_file.exists():
-                compose_cmd.append("--env-file")
-                compose_cmd.append(".env")
+                base_cmd += ["--env-file", ".env"]
             profile = self._detect_compose_profiles(compose)
             if profile:
-                compose_cmd.extend(["--profile", profile])
-            compose_cmd.extend(["up", "-d"])
-            result = run_command(
-                compose_cmd,
-                cwd=str(self.project_dir), capture=False, env=svc_env,
-            )
-            if result.ok:
-                console.print("  [success]Services started.[/success]")
-                self._write_state(docker=True)
+                base_cmd += ["--profile", profile]
+
+            # Bring the stack up, retrying on failure. Docker reuses every build
+            # layer it already finished, so a retry after a flaky-network timeout
+            # RESUMES rather than rebuilding — this is what lets big images (which
+            # download hundreds of MB) actually finish on an unstable connection.
+            attempts = 3
+            result = None
+            for attempt in range(1, attempts + 1):
+                if attempt > 1:
+                    console.print(
+                        f"  [warning]Bring-up didn't finish — retry {attempt - 1} of "
+                        f"{attempts - 1} (Docker resumes from its build cache)…[/warning]"
+                    )
+                result = run_command(
+                    base_cmd + ["up", "-d"],
+                    cwd=str(self.project_dir), capture=False, env=svc_env,
+                )
+                if result.ok:
+                    break
+
+            if not result.ok:
+                console.print(
+                    "  [error]Couldn't start the services after several tries.[/error] "
+                    "The Docker build or image pull didn't finish — usually a slow or "
+                    "unstable network timing out while downloading images/packages, a "
+                    "missing value in [bold].env[/bold], or a registry needing "
+                    "[bold]docker login[/bold]."
+                )
+                console.print(
+                    "  [muted]Nothing shows in Docker Desktop because no image finished "
+                    "building, so no container was created. Docker keeps the layers it "
+                    "did complete — re-run [bold]devready start[/bold] and it resumes "
+                    "from there.[/muted]"
+                )
+                self._diagnose_failed_containers(base_cmd, svc_env)
                 return
-            console.print(
-                "  [error]Failed to start services.[/error] "
-                "The Docker build or image pull didn't finish — most often a slow or "
-                "unstable network timing out while downloading images/packages, a "
-                "missing value in [bold].env[/bold], or a registry needing "
-                "[bold]docker login[/bold]."
-            )
-            console.print(
-                "  [muted]Docker keeps every build layer it already completed, so "
-                "re-running [bold]devready start[/bold] resumes from where it stopped "
-                "instead of starting over — worth a retry if the network was the "
-                "issue. Check the build output above for the failing step.[/muted]"
-            )
+
+            # `up` reported success — VERIFY containers are actually running and
+            # show them, so "I see nothing in Docker Desktop" is never a mystery.
+            if self._report_compose_status(base_cmd, svc_env):
+                self._write_state(docker=True)
             return
 
         # No compose file, but the project talks to a database/cache — provision
@@ -670,6 +688,59 @@ class Engine:
         started = services.ensure_services(needed, env=svc_env)
         if started:
             self._write_state(service_containers=started)
+
+    def _report_compose_status(self, base_cmd: List[str], svc_env: Optional[dict]) -> bool:
+        """After ``compose up``, list the containers so the user can see them in
+        Docker Desktop, and confirm at least one is actually running.
+
+        Returns True if a container is up. If ``up`` reported success but nothing
+        is running (a container that started then immediately exited), we say so
+        and dump its logs instead of a misleading "Services started".
+        """
+        # Container IDs of services that are up right now (running/created).
+        running = run_command(
+            base_cmd + ["ps", "-q"], cwd=str(self.project_dir), capture=True, env=svc_env,
+        )
+        ids = [ln for ln in (running.stdout or "").splitlines() if ln.strip()]
+        # The human-readable table (names, status, ports) — show it verbatim.
+        table = run_command(
+            base_cmd + ["ps"], cwd=str(self.project_dir), capture=True, env=svc_env,
+        )
+        if ids:
+            console.print(f"  [success]Services started — {len(ids)} container(s) running:[/success]")
+            for line in (table.stdout or "").strip().splitlines():
+                console.print(f"  [muted]{line}[/muted]")
+            console.print("  [muted]These now appear in Docker Desktop → Containers.[/muted]")
+            return True
+        # `up` succeeded but nothing is running → a container exited on startup.
+        console.print(
+            "  [warning]The stack was created but no container stayed running — "
+            "a service likely crashed on startup (often a missing env var or a "
+            "failed migration).[/warning]"
+        )
+        self._diagnose_failed_containers(base_cmd, svc_env)
+        return False
+
+    def _diagnose_failed_containers(self, base_cmd: List[str], svc_env: Optional[dict]) -> None:
+        """Show stopped/failed containers and a tail of their logs, so a crash is
+        visible instead of a silent "no containers"."""
+        table = run_command(
+            base_cmd + ["ps", "-a"], cwd=str(self.project_dir), capture=True, env=svc_env,
+        )
+        rows = (table.stdout or "").strip()
+        if rows:
+            console.print("  [muted]Containers (including stopped):[/muted]")
+            for line in rows.splitlines():
+                console.print(f"  [muted]{line}[/muted]")
+        logs = run_command(
+            base_cmd + ["logs", "--tail", "20"],
+            cwd=str(self.project_dir), capture=True, env=svc_env,
+        )
+        tail = (logs.stdout or logs.stderr or "").strip()
+        if tail:
+            console.print("  [muted]Recent service logs:[/muted]")
+            for line in tail.splitlines()[-20:]:
+                console.print(f"  [muted]{line}[/muted]")
 
     @staticmethod
     def _detect_compose_profiles(compose_path: Path) -> Optional[str]:

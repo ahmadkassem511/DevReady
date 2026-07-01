@@ -250,6 +250,45 @@ def test_detect_port_from_log_falls_back_when_silent(tmp_path):
     assert eng._detect_port_from_log(log, fallback=8000) == 8000
 
 
+def test_report_compose_status_lists_running_containers(tmp_path, monkeypatch):
+    # After `up`, DevReady must confirm containers are actually running and show
+    # them (so "nothing in Docker Desktop" is never a silent mystery).
+    import devready.engine as engine_mod
+    from devready.utils import CommandResult
+
+    def fake_run(cmd, **kw):
+        if cmd[-2:] == ["ps", "-q"]:
+            return CommandResult("ps -q", 0, stdout="abc123\ndef456\n")
+        if cmd[-1] == "ps":
+            return CommandResult("ps", 0, stdout="NAME     STATUS\napi      Up 3s\ndb       Up 3s\n")
+        return CommandResult("x", 0)
+
+    monkeypatch.setattr(engine_mod, "run_command", fake_run)
+    eng = Engine(project_dir=tmp_path)
+    assert eng._report_compose_status(["docker", "compose"], None) is True
+
+
+def test_report_compose_status_flags_crashed_container(tmp_path, monkeypatch):
+    # `up` succeeded but nothing stayed running -> report False and diagnose.
+    import devready.engine as engine_mod
+    from devready.utils import CommandResult
+
+    def fake_run(cmd, **kw):
+        if cmd[-2:] == ["ps", "-q"]:
+            return CommandResult("ps -q", 0, stdout="")          # nothing running
+        if cmd[-2:] == ["ps", "-a"]:
+            return CommandResult("ps -a", 0, stdout="NAME  STATUS\napi   Exited (1)\n")
+        if cmd[-3:] == ["logs", "--tail", "20"]:
+            return CommandResult("logs", 0, stdout="Error: missing DATABASE_URL\n")
+        if cmd[-1] == "ps":
+            return CommandResult("ps", 0, stdout="")
+        return CommandResult("x", 0)
+
+    monkeypatch.setattr(engine_mod, "run_command", fake_run)
+    eng = Engine(project_dir=tmp_path)
+    assert eng._report_compose_status(["docker", "compose"], None) is False
+
+
 def test_needs_interactive_setup_detects_onboarding(tmp_path):
     # openclaw's gateway prints this and never binds a port until onboarded.
     eng = Engine(project_dir=tmp_path)
