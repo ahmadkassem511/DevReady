@@ -96,6 +96,69 @@ def test_project_setup_success_returns_true(tmp_path, monkeypatch):
     assert eng._project_setup_ran is True
 
 
+def _stub_incompatible_check(monkeypatch):
+    """Force _step_system_check to see an incompatible machine (no CUDA GPU)."""
+    from devready.environment import system_check as sc
+
+    hw = sc.HardwareInfo(
+        os_name="Windows 10", os_arch="amd64", cpu_cores=4, cpu_model="x",
+        ram_gb=7.0, disk_free_gb=10.0,
+        gpu_model="Intel(R) HD Graphics 3000", gpu_cuda_capable=False,
+    )
+    req = sc.SystemRequirements(gpu_required=True, gpu_cuda_required=True, source="regex")
+    report = sc.CompatibilityReport(
+        compatible=False,
+        checks=[sc.CheckResult("GPU", "error", "Intel HD", "CUDA-capable GPU", "no cuda")],
+        hw=hw, req=req,
+    )
+    monkeypatch.setattr(sc, "get_hardware_info", lambda *a, **k: hw)
+    monkeypatch.setattr(sc, "extract_requirements", lambda *a, **k: req)
+    monkeypatch.setattr(sc, "check_compatibility", lambda *a, **k: report)
+    monkeypatch.setattr(sc, "print_report", lambda *a, **k: None)
+
+
+def test_incompatible_check_prompts_and_continues_on_yes(tmp_path, monkeypatch):
+    # Interactive CLI: a failed check must ASK, and a "yes" overrides so the
+    # install proceeds (instead of forcing a re-run with --yes).
+    (tmp_path / "requirements.txt").write_text("torch\n")
+    _stub_incompatible_check(monkeypatch)
+    eng = Engine(project_dir=tmp_path)
+    asked = {}
+    def fake_confirm(prompt, default_yes=True):
+        asked["prompt"] = prompt
+        asked["default_yes"] = default_yes
+        return True
+    eng._confirm = fake_confirm
+
+    eng._step_system_check()
+    assert asked.get("default_yes") is False   # defaults to No (safe)
+    assert eng._compat_ok is True              # user chose to continue anyway
+
+
+def test_incompatible_check_blocks_on_no(tmp_path, monkeypatch):
+    (tmp_path / "requirements.txt").write_text("torch\n")
+    _stub_incompatible_check(monkeypatch)
+    eng = Engine(project_dir=tmp_path)
+    eng._confirm = lambda prompt, default_yes=True: False
+
+    eng._step_system_check()
+    assert eng._compat_ok is False             # declined -> start() will abort
+
+
+def test_incompatible_check_under_yes_does_not_prompt(tmp_path, monkeypatch):
+    # Unattended (--yes / GUI): never prompt; proceed. _compat_ok stays False but
+    # the start() gate lets --yes through.
+    (tmp_path / "requirements.txt").write_text("torch\n")
+    _stub_incompatible_check(monkeypatch)
+    eng = Engine(project_dir=tmp_path, assume_yes=True)
+    prompted = {"v": False}
+    eng._confirm = lambda *a, **k: prompted.__setitem__("v", True) or True
+
+    eng._step_system_check()
+    assert prompted["v"] is False
+    assert eng._compat_ok is False
+
+
 def test_run_brings_up_services_on_relaunch(tmp_path, monkeypatch):
     # The "Run" path must bring up Docker services too (not just the web command),
     # so installing Docker then clicking Run does the full setup.

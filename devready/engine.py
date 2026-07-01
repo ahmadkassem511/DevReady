@@ -177,11 +177,12 @@ class Engine:
 
         self._step_detect()
         self._step_analyze_readme()
-        # Step 3: compatibility check (critical mismatches block install;
-        # --yes suppresses the block but still shows the report)
+        # Step 3: compatibility check. On a critical mismatch it prompts
+        # "continue anyway?" (interactive) or proceeds under --yes; _compat_ok is
+        # True here only if the machine passed OR the user chose to override.
         self._step_system_check()
         if not self._compat_ok and not self.assume_yes:
-            return False  # blocked by compatibility check (only when not --yes)
+            return False  # user declined to continue on an incompatible machine
         self._print_plan()  # complete plan (toolchains + packages + env) before any install
         self._step_system_deps()
         self._step_environment()
@@ -336,9 +337,23 @@ class Engine:
             self._compat_ok = False
             console.print(
                 "  [warning]This machine may not meet the project's requirements.[/warning]"
-                "\n  [muted]Install will still proceed with [bold]--yes[/bold]; otherwise "
-                "re-run with [bold]devready start --yes[/bold] to continue anyway.[/muted]"
             )
+            if self.assume_yes:
+                # Unattended (e.g. the GUI, which prompts in the browser instead):
+                # proceed, but say so plainly.
+                console.print(
+                    "  [muted]Continuing anyway because [bold]--yes[/bold] was given.[/muted]"
+                )
+            elif self._confirm("  Do you want to continue installing anyway? [y/N] ",
+                               default_yes=False):
+                # The user explicitly chose to override the failed check.
+                self._compat_ok = True
+                console.print("  [muted]Continuing at your request…[/muted]")
+            else:
+                console.print(
+                    "  [muted]Stopping — nothing was installed. "
+                    "Re-run when you're on a compatible machine.[/muted]"
+                )
 
     # -- Step 4: System dependency install -----------------------------------
     def _step_system_deps(self) -> None:
