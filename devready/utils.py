@@ -15,6 +15,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -210,6 +212,7 @@ def run_command_teed(
     timeout: Optional[int] = None,
     max_capture_lines: int = 400,
     env: Optional[dict] = None,
+    heartbeat_secs: int = 45,
 ) -> CommandResult:
     """Run a command, streaming its output live AND capturing the tail.
 
@@ -219,6 +222,12 @@ def run_command_teed(
     e.g. handed to the LLM healer. Only the last ``max_capture_lines`` lines are
     retained, which is more than enough for an error trace while keeping memory
     bounded on a chatty build.
+
+    ``heartbeat_secs``: when the child produces no output for this long, print a
+    liveness note (with elapsed time). Heavy builds — e.g. ``pip install .`` that
+    compiles a frontend, or a big wheel — can be silent for many minutes; without
+    this the run looks frozen, especially in the GUI whose only signal is the
+    streamed log. Set to 0 to disable.
 
     Returns a :class:`CommandResult` whose ``stdout`` holds the captured tail.
     Never raises on a non-zero exit; the caller decides what failure means.
@@ -245,18 +254,47 @@ def run_command_teed(
     except FileNotFoundError:
         return CommandResult(command=display, returncode=127, stderr="command not found")
 
+    # Heartbeat watchdog: the read loop below blocks while the child is silent, so
+    # a separate thread emits "still working" notes so a long quiet build doesn't
+    # look frozen. It writes to stdout (which the GUI streams) and never touches
+    # the captured tail, so diagnosis output is unchanged.
+    start = time.time()
+    last_output = [start]
+    stop = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop.wait(min(heartbeat_secs, 10)):
+            if time.time() - last_output[0] >= heartbeat_secs:
+                mins = int((time.time() - start) // 60)
+                elapsed = f"{mins} min" if mins else "under a minute"
+                sys.stdout.write(
+                    f"  … still working — {elapsed} elapsed (large builds/downloads "
+                    f"can be quiet for a while; please keep waiting)\n"
+                )
+                sys.stdout.flush()
+                last_output[0] = time.time()  # wait another full interval before the next note
+
+    hb = None
+    if heartbeat_secs and heartbeat_secs > 0:
+        hb = threading.Thread(target=_heartbeat, daemon=True)
+        hb.start()
+
     try:
         assert process.stdout is not None
         for line in process.stdout:
+            last_output[0] = time.time()
             sys.stdout.write(line)
             captured.append(line)
         sys.stdout.flush()
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        stop.set()
         process.kill()
         return CommandResult(
             command=display, returncode=124, stderr="timed out", stdout="".join(captured)
         )
+    finally:
+        stop.set()
 
     return CommandResult(
         command=display, returncode=process.returncode, stdout="".join(captured)
