@@ -418,6 +418,7 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
                         "project_dir": job.project_dir,
                         "urls": job.urls,
                         "needs_docker": job.needs_docker,
+                        "onboarding_command": job.onboarding_command,
                     }
                     yield f"data: {json.dumps(payload)}\n\n"
                     break

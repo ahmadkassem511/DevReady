@@ -909,6 +909,12 @@ class Engine:
         # fallback — the docs know the real entry point (e.g. `make dev`, not the
         # `npm run dev` that merely builds assets).
         guide = self._project_guide() if self.config.llm.is_configured else None
+        # Persist any one-time onboarding command so both the CLI guide and the
+        # GUI can show it as the clear "next step" to finish setup.
+        onboarding = self._guide_onboarding_command(guide)
+        if onboarding:
+            self._write_state(onboarding_command=onboarding)
+
         if guide and self._has_runnable_web_command(guide):
             served = self._try_guided_launch(guide)
             if not served:
@@ -984,8 +990,25 @@ class Engine:
             return None
         return self._resolve_server_command(cmd_str)
 
+    def _guide_onboarding_command(self, guide: Optional[dict]) -> Optional[str]:
+        """The documented one-time interactive setup command (onboarding/login),
+        resolved to a copy-paste-correct form. Returned as a display string, or
+        None. We never auto-run it — it needs the user's terminal and input."""
+        if not guide:
+            return None
+        cmd_str = (guide.get("onboarding_command") or "").strip()
+        if not cmd_str:
+            return None
+        from .ai.guide import is_safe_server_command
+        if not is_safe_server_command(cmd_str):
+            return None
+        resolved = self._resolve_server_command(cmd_str)
+        # Prefer the resolved argv (e.g. `node openclaw.mjs onboard`); if we can't
+        # resolve the project CLI, show the documented command as-is.
+        return " ".join(resolved) if resolved else cmd_str
+
     def _resolve_server_command(self, cmd_str: str) -> Optional[List[str]]:
-        """Turn a documented server command into an argv we can actually spawn.
+        """Turn a documented server/onboarding command into an argv we can spawn.
 
         Handles a project's own CLI that isn't on PATH: a root ``<name>.mjs`` /
         ``<name>.js`` entry is run with ``node``; otherwise a Node project's bin
@@ -1288,10 +1311,9 @@ class Engine:
                     console.print(
                         f"  [warning]• {name} needs a one-time interactive setup "
                         f"(onboarding/login) before it can serve — it won't come up "
-                        f"on its own.[/warning]\n"
-                        f"  [muted]Run that step in your terminal (see the guide below "
-                        f"and the recent output), then re-run.[/muted]"
+                        f"on its own.[/warning]"
                     )
+                    self._print_onboarding_hint(log_path)
                 else:
                     console.print(
                         f"  [warning]• {name} started but isn't serving on port {announced} yet.[/warning]\n"
@@ -1306,7 +1328,7 @@ class Engine:
                     f"  [warning]• {name} started but needs a one-time interactive "
                     f"setup (onboarding/login) before it can serve.[/warning]"
                 )
-                self._print_log_tail(log_path, lines=12)
+                self._print_onboarding_hint(log_path)
             else:
                 # A CLI / worker with no web URL — alive is success.
                 console.print(f"  [success]✓ {name} is running[/success] (no web URL).")
@@ -1314,6 +1336,21 @@ class Engine:
         if served:
             console.print("  Stop everything with [bold]devready stop[/bold].")
         return served
+
+    def _print_onboarding_hint(self, log_path: Path) -> None:
+        """Point the user at the exact one-time setup command to run next, if the
+        guide identified one; otherwise show the process's recent output."""
+        onboarding = self._read_state().get("onboarding_command")
+        if onboarding:
+            console.print(
+                f"  [bold]▶ Next step — run this in your terminal to finish setup:[/bold]\n"
+                f"      [bold cyan]{onboarding}[/bold cyan]\n"
+                f"  [muted]It's interactive (it may ask for an API key or choices), then "
+                f"re-run [bold]devready run[/bold].[/muted]"
+            )
+        else:
+            console.print("  [muted]See the recent output below for the command to run:[/muted]")
+            self._print_log_tail(log_path, lines=12)
 
     # Signatures of a build/compile error in a dev server's output. Lower-cased
     # match — covers webpack/Next/Vite/TS/Node/Python module-resolution failures.
@@ -1734,6 +1771,15 @@ class Engine:
         what = guide.get("what_it_is", "")
         if what:
             console.print(f"  {what}\n")
+        # A one-time onboarding/login is the very first thing the user must do —
+        # surface it prominently above the general steps.
+        onboarding = self._guide_onboarding_command(guide)
+        if onboarding:
+            console.print(
+                f"  [bold]▶ First, finish the one-time setup — run this in your terminal:[/bold]\n"
+                f"      [bold cyan]{onboarding}[/bold cyan]\n"
+                f"  [muted]It's interactive (it may ask for an API key or choices).[/muted]\n"
+            )
         steps = guide.get("steps") or []
         if steps:
             console.print("  [bold]Steps to run / use it:[/bold]")

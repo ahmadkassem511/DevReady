@@ -71,7 +71,7 @@ def test_is_safe_server_command_allows_project_cli_rejects_shell():
     assert is_safe_server_command("") is False
 
 
-def test_guide_captures_server_command(tmp_path, monkeypatch):
+def test_guide_captures_server_and_onboarding_commands(tmp_path, monkeypatch):
     import devready.ai.client as client
 
     monkeypatch.setattr(
@@ -80,11 +80,27 @@ def test_guide_captures_server_command(tmp_path, monkeypatch):
             "what_it_is": "A local AI gateway.",
             "has_web_ui": False,
             "server_command": "openclaw gateway run",
+            "onboarding_command": "openclaw onboard",
             "steps": ["openclaw onboard"],
         },
     )
     g = generate_project_guide(_configured(), tmp_path, [], ReadmeInsights())
     assert g["server_command"] == "openclaw gateway run"
+    assert g["onboarding_command"] == "openclaw onboard"
+
+
+def test_guide_onboarding_command_resolves_and_persists(tmp_path):
+    # openclaw case: resolves `openclaw onboard` to a runnable/copyable form and
+    # the engine persists it so the CLI guide and GUI can show it.
+    (tmp_path / "openclaw.mjs").write_text("// entry\n")
+    eng = Engine(project_dir=tmp_path)
+    guide = {"onboarding_command": "openclaw onboard"}
+    resolved = eng._guide_onboarding_command(guide)
+    assert resolved == "node openclaw.mjs onboard"
+    # None when there's nothing to onboard.
+    assert eng._guide_onboarding_command({"onboarding_command": ""}) is None
+    # Unsafe commands are rejected.
+    assert eng._guide_onboarding_command({"onboarding_command": "onboard && rm -rf /"}) is None
 
 
 def test_try_guided_launch_runs_documented_web_command(tmp_path, monkeypatch):

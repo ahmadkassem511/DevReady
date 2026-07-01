@@ -80,6 +80,7 @@ class Job:
     project_dir: Optional[str] = None
     urls: List[str] = field(default_factory=list)
     needs_docker: bool = False  # project needs a container engine that's unavailable
+    onboarding_command: Optional[str] = None  # one-time setup the user must run
     queue: "queue.Queue" = field(default_factory=queue.Queue)
 
 
@@ -126,6 +127,7 @@ class JobManager:
             else:
                 job.status = "error"
             job.needs_docker = self._read_needs_docker(Path(job.project_dir))
+            job.onboarding_command = self._read_onboarding_command(Path(job.project_dir))
         except Exception as exc:
             job.status = "error"
             self._emit(job, f"✗ Unexpected error: {exc}")
@@ -200,6 +202,7 @@ class JobManager:
             else:
                 job.status = "error"
             job.needs_docker = self._read_needs_docker(target)
+            job.onboarding_command = self._read_onboarding_command(target)
         except Exception as exc:  # never let a job thread die silently
             job.status = "error"
             self._emit(job, f"✗ Unexpected error: {exc}")
@@ -246,3 +249,13 @@ class JobManager:
             return bool(Engine(project_dir=project_dir)._read_state().get("needs_container_engine"))
         except Exception:
             return False
+
+    def _read_onboarding_command(self, project_dir: Path) -> Optional[str]:
+        """The one-time interactive setup command the project needs, if any."""
+        from ..engine import Engine
+
+        try:
+            cmd = Engine(project_dir=project_dir)._read_state().get("onboarding_command")
+            return cmd or None
+        except Exception:
+            return None

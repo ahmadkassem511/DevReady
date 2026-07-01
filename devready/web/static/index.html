@@ -501,6 +501,29 @@
             dbtn.onclick = () => installDocker(dbtn);
             actions.appendChild(dbtn);
           }
+          // A one-time interactive setup (onboarding/login) the project needs.
+          // It must run in a real terminal (it asks for input/API keys), so we
+          // show the exact command with a Copy button rather than running it.
+          if (msg.onboarding_command) {
+            const card = document.createElement("div");
+            card.className = "note";
+            card.style.cssText = "width:100%;margin-top:10px;padding:10px 14px;border:1px solid var(--yellow,#d29922);border-radius:8px;background:rgba(210,153,34,.12);";
+            const cmd = msg.onboarding_command;
+            card.innerHTML =
+              `<div style="color:var(--yellow,#d29922);font-weight:600;margin-bottom:6px">▶ One more step to finish setup</div>` +
+              `<div class="muted" style="font-size:12px;margin-bottom:8px">Run this in your terminal (it's interactive — it may ask for an API key), then click Run:</div>` +
+              `<div style="display:flex;gap:8px;align-items:center">` +
+              `<code style="flex:1;padding:6px 10px;background:rgba(0,0,0,.25);border-radius:6px;font-size:12px;overflow:auto">${esc(cmd)}</code>` +
+              `<button class="btn secondary" id="onb-copy" style="white-space:nowrap">Copy</button></div>`;
+            actions.appendChild(card);
+            const copyBtn = card.querySelector("#onb-copy");
+            if (copyBtn) copyBtn.onclick = () => {
+              navigator.clipboard.writeText(cmd).then(
+                () => { copyBtn.textContent = "Copied ✓"; setTimeout(() => copyBtn.textContent = "Copy", 1500); },
+                () => { copyBtn.textContent = "Copy failed"; }
+              );
+            };
+          }
           const close = document.createElement("button");
           close.className = "btn secondary"; close.textContent = "Close";
           close.onclick = () => { closeOverlay(); loadLibrary(); };

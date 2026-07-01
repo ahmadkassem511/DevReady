@@ -35,6 +35,10 @@ GUIDE_SYSTEM_PROMPT = (
     'browser page) — the SINGLE command that starts that server (e.g. '
     '"openclaw gateway run", "myapp serve", "foo start"); else an empty string. '
     "One command only, no operators.\n"
+    '  "onboarding_command": if the project needs a ONE-TIME interactive setup '
+    "before it works — onboarding/login/init, e.g. to enter an API key or choose "
+    'options — the SINGLE command that runs it (e.g. "openclaw onboard", '
+    '"gh auth login", "foo init"); else an empty string. One command, no operators.\n'
     '  "steps": array of short, concrete, copy-pasteable steps to run or use it '
     "(include the actual commands; assume deps are already installed so do NOT "
     "include install steps),\n"
@@ -94,6 +98,7 @@ def generate_project_guide(
         "launch_command": str(data.get("launch_command", "")).strip(),
         "url": str(data.get("url", "")).strip(),
         "server_command": str(data.get("server_command", "")).strip(),
+        "onboarding_command": str(data.get("onboarding_command", "")).strip(),
         "steps": steps,
         "tips": str(data.get("tips", "")).strip(),
     }
