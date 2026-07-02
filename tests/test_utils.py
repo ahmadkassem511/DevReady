@@ -21,6 +21,20 @@ def test_force_rmtree_deletes_readonly_git_files(tmp_path):
     assert not proj.exists()
 
 
+def test_force_rmtree_deletes_readonly_directories(tmp_path):
+    # POSIX regression: deletion rights live on the parent DIRECTORY there, and
+    # the old S_IWRITE-only chmod (0o200) stripped read+execute from dirs so
+    # rmtree could no longer traverse them — force_rmtree bricked its own tree.
+    proj = tmp_path / "proj"
+    inner = proj / ".git" / "objects"
+    inner.mkdir(parents=True)
+    (inner / "pack-abc.idx").write_text("data")
+    os.chmod(inner, stat.S_IREAD | stat.S_IEXEC)  # read-only dir
+
+    assert force_rmtree(proj) is True
+    assert not proj.exists()
+
+
 def test_force_rmtree_missing_path_is_ok(tmp_path):
     assert force_rmtree(tmp_path / "does-not-exist") is True
 

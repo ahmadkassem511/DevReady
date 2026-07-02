@@ -313,6 +313,11 @@ def force_rmtree(path: "Path | str", attempts: int = 3) -> bool:
     to outlast transient locks from antivirus / the search indexer.
     """
     target = Path(path)
+    # Full owner permissions (rwx). On Windows any write bit clears the
+    # read-only attribute; on POSIX directories must KEEP read+execute or
+    # rmtree can no longer list/traverse them (bare S_IWRITE = 0o200 would
+    # brick the tree we're trying to delete).
+    writable = stat.S_IRWXU
     for _ in range(max(1, attempts)):
         if not target.exists():
             return True
@@ -320,11 +325,11 @@ def force_rmtree(path: "Path | str", attempts: int = 3) -> bool:
         for root, dirs, files in os.walk(target):
             for name in dirs + files:
                 try:
-                    os.chmod(os.path.join(root, name), stat.S_IWRITE)
+                    os.chmod(os.path.join(root, name), writable)
                 except OSError:
                     pass
         try:
-            os.chmod(target, stat.S_IWRITE)
+            os.chmod(target, writable)
         except OSError:
             pass
         shutil.rmtree(target, ignore_errors=True)
