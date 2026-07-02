@@ -136,6 +136,16 @@ def setup_python(project_dir: Path, result: DetectionResult, healer=None) -> Lis
     return outcomes
 
 
+# Written into .venv when the published-package path was taken, so later steps
+# (root Node install, source sub-projects) know the wheel already IS the app.
+_PUBLISHED_MARKER = ".devready-published-install"
+
+
+def used_published_package(project_dir: Path) -> bool:
+    """True if this project was installed from its official published package."""
+    return (project_dir / ".venv" / _PUBLISHED_MARKER).exists()
+
+
 def _project_package_name(project_dir: Path) -> Optional[str]:
     """The distribution name declared in pyproject.toml's [project] table, or None."""
     pyproject = project_dir / "pyproject.toml"
@@ -199,6 +209,15 @@ def _published_package_install(
     )
     result = _pip_install(venv_python, [name], project_dir, healer)
     if result.ok:
+        # Record the choice so the rest of the pipeline stands down: the wheel
+        # IS the complete app (frontend pre-built, backend included), so the
+        # root npm install and source sub-projects (e.g. backend/) are redundant.
+        try:
+            marker = project_dir / ".venv" / _PUBLISHED_MARKER
+            marker.parent.mkdir(exist_ok=True)
+            marker.write_text(name, encoding="utf-8")
+        except OSError:
+            pass
         return result
     console.print(
         "  [warning]Published-package install didn't succeed — building from "

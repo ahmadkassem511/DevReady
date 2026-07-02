@@ -319,6 +319,26 @@ def test_resolve_server_command_unresolvable(tmp_path, monkeypatch):
     assert eng._resolve_server_command("openclaw gateway run") is None
 
 
+def test_subprojects_skipped_after_published_install(tmp_path, monkeypatch):
+    # Once the official published package is installed, the source tree's
+    # components (e.g. Open WebUI's backend/) are the code the wheel already
+    # ships — setting them up again is a redundant multi-gigabyte install.
+    from devready.environment import version_manager as vm
+
+    marker_dir = tmp_path / ".venv"
+    marker_dir.mkdir()
+    (marker_dir / vm._PUBLISHED_MARKER).write_text("open-webui")
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "requirements.txt").write_text("fastapi\n")
+
+    eng = Engine(project_dir=tmp_path)
+    monkeypatch.setattr(
+        eng, "_detect_subprojects",
+        lambda: (_ for _ in ()).throw(AssertionError("must not scan sub-projects")),
+    )
+    eng._setup_subprojects()  # returns early — never even scans
+
+
 def test_collect_launch_targets_adds_server_from_guide(tmp_path, monkeypatch):
     import devready.engine as engine_mod
     (tmp_path / "openclaw.mjs").write_text("// entry\n")

@@ -388,6 +388,16 @@ class Engine:
         if self.detections:
             healer = self._make_healer(self.project_dir)
             for det in self.detections:
+                # Once the Python setup installed the project's official published
+                # package, the wheel IS the complete app (frontend pre-built) —
+                # compiling the bundled JS source would redo work the wheel ships.
+                if (det.language != "Python"
+                        and version_manager.used_published_package(self.project_dir)):
+                    console.print(
+                        f"  [muted]Skipping {det.language} setup — the published package "
+                        f"already includes the pre-built frontend.[/muted]"
+                    )
+                    continue
                 console.print(f"  Setting up [bold]{det.language}[/bold]…")
                 outcomes = version_manager.setup_environment(self.project_dir, det, healer)
                 # Report any failed sub-steps so the user knows before we launch.
@@ -460,6 +470,17 @@ class Engine:
         root, in its own directory — so a monorepo (Python API + Node frontend,
         say) is fully bootstrapped. We ask before each one (unless --yes).
         """
+        # When the app was installed from its official published package, the
+        # source tree's components (e.g. Open WebUI's backend/) are the very
+        # code the wheel already ships — setting them up is a second, redundant
+        # multi-gigabyte install.
+        if version_manager.used_published_package(self.project_dir):
+            console.print(
+                "  [muted]Skipping source sub-projects — the published package "
+                "already contains the full app.[/muted]"
+            )
+            return
+
         subprojects = self._detect_subprojects()
         if not subprojects:
             return
@@ -1217,6 +1238,7 @@ class Engine:
         # guess — even when that URL is printed a few seconds after launch.
         reachable_port, announced = self._wait_for_announced_port(
             log_path, guess=port, timeout=effective_timeout, label=name,
+            process=process,
         )
         return {
             "name": name,
@@ -1227,22 +1249,36 @@ class Engine:
             "cwd": cwd,
         }
 
+    # A first boot may legitimately grind for minutes (downloading ML models,
+    # seeding a database) before binding its port. As long as the process is
+    # alive AND still producing output we keep waiting — up to this hard cap.
+    _ACTIVE_STARTUP_CAP = 600  # seconds
+
     def _wait_for_announced_port(
         self,
         log_path: Path,
         guess: Optional[int],
         timeout: int,
         label: Optional[str] = None,
+        process: Optional[subprocess.Popen] = None,
     ) -> Tuple[Optional[int], Optional[int]]:
         """Wait until the server accepts a TCP connection, re-scanning its log for
         the real port as it appears. Polls both the announced port and our guess.
+
+        The base ``timeout`` covers a server that silently hangs. But when the
+        process is alive and its log keeps growing (first-run model downloads,
+        database seeding), giving up early would misreport a healthy app as
+        "not serving" — so activity extends the deadline, up to a hard cap.
 
         Returns ``(reachable_port, announced_port)`` — ``reachable_port`` is set
         only when a port actually answered.
         """
         deadline = time.time() + max(timeout, 1)
+        hard_deadline = time.time() + max(self._ACTIVE_STARTUP_CAP, timeout)
         next_notice = time.time() + 20
         announced = self._detect_port_from_log(log_path, guess)
+        last_size = self._log_size(log_path)
+        said_busy = False
         while True:
             announced = self._detect_port_from_log(log_path, announced or guess)
             # Try the announced port first, then fall back to the guess.
@@ -1252,7 +1288,24 @@ class Engine:
                     if sock.connect_ex(("127.0.0.1", candidate)) == 0:
                         return candidate, (announced or candidate)
             if time.time() >= deadline:
-                return None, announced
+                size = self._log_size(log_path)
+                still_working = (
+                    process is not None
+                    and process.poll() is None
+                    and size != last_size
+                    and time.time() < hard_deadline
+                )
+                if not still_working:
+                    return None, announced
+                last_size = size
+                deadline = min(time.time() + 30, hard_deadline)
+                if label and not said_busy:
+                    said_busy = True
+                    console.print(
+                        f"  [muted]…{label} is busy starting up (first runs can download "
+                        f"models or seed data) — DevReady will keep waiting while it's "
+                        f"making progress (up to ~{int((hard_deadline - time.time()) / 60)} min).[/muted]"
+                    )
             if label and time.time() >= next_notice:
                 remaining = max(0, int(deadline - time.time()))
                 console.print(
@@ -1269,6 +1322,14 @@ class Engine:
     # their URL in them, so "localhost:\x1b[1m5173" would otherwise defeat the
     # port regex and make a perfectly-running server look like it never started.
     _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+    @staticmethod
+    def _log_size(log_path: Path) -> int:
+        """Current size of a launch log — our cheap 'is it still doing things' probe."""
+        try:
+            return log_path.stat().st_size
+        except OSError:
+            return 0
 
     def _detect_port_from_log(self, log_path: Path, fallback: Optional[int]) -> Optional[int]:
         """Find the port a launched server announced in its log, else the fallback."""
@@ -1799,6 +1860,10 @@ class Engine:
             port_timeout, expect_detached = 360, True
         else:
             port_timeout, expect_detached = 60, False
+            # The documented run path doesn't use a container engine, so an
+            # earlier "compose services couldn't start" must not scare the user
+            # (or the GUI) into thinking Docker is required to use the app.
+            self._write_state(needs_container_engine=False)
 
         target = {
             "name": "root",

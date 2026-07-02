@@ -298,12 +298,54 @@ def test_ensure_packages_uses_winget_when_not_elevated(monkeypatch):
     monkeypatch.setattr(sd, "_refresh_path", lambda m=None: None)
     ran = []
     monkeypatch.setattr(
-        sd, "run_command", lambda cmd, **k: ran.append(cmd) or CommandResult(command="x", returncode=0)
+        sd, "run_command_teed", lambda cmd, **k: ran.append(cmd) or CommandResult(command="x", returncode=0)
     )
 
     sd.ensure_packages(["ffmpeg"], assume_yes=True)
     assert any(c[0] == "winget" for c in ran)
     assert not any(c[0] == "choco" for c in ran)
+
+
+def test_ensure_packages_skips_linux_only_on_windows(monkeypatch):
+    # READMEs list packages for the Docker/Linux deployment (e.g. Open WebUI's
+    # nvidia-container-toolkit) — pointless on Windows, and scoop's failed
+    # lookup even exits 0, faking a success.
+    import devready.environment.system_deps as sd
+
+    monkeypatch.setattr(sd.sys, "platform", "win32")
+    monkeypatch.setattr(sd, "command_exists", lambda n: n == "scoop")
+    monkeypatch.setattr(sd, "is_elevated", lambda: False)
+    monkeypatch.setattr(
+        sd, "run_command_teed",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not install")),
+    )
+    assert sd.ensure_packages(["nvidia-container-toolkit"], assume_yes=True) == []
+
+
+def test_ensure_packages_scoop_manifest_miss_is_failure(monkeypatch):
+    # scoop exits 0 after "Couldn't find manifest" — that must not be reported
+    # as an install success.
+    import devready.environment.system_deps as sd
+    from devready.utils import CommandResult
+
+    monkeypatch.setattr(sd.os, "name", "nt")
+    monkeypatch.setattr(sd, "is_elevated", lambda: False)
+    monkeypatch.setattr(sd, "command_exists", lambda n: n == "scoop")
+    monkeypatch.setattr(sd, "_refresh_path", lambda m=None: None)
+    monkeypatch.setattr(
+        sd, "run_command_teed",
+        lambda cmd, **k: CommandResult(
+            command="scoop install nope", returncode=0,
+            stdout="Couldn't find manifest for 'nope'.",
+        ),
+    )
+    messages = []
+    monkeypatch.setattr(sd.console, "print", lambda *a, **k: messages.append(" ".join(str(x) for x in a)))
+
+    sd.ensure_packages(["nope"], assume_yes=True)
+    blob = " ".join(messages)
+    assert "Installed nope" not in blob          # no fake success
+    assert "Couldn't install nope" in blob       # honest outcome
 
 
 def test_docker_in_tool_packages():

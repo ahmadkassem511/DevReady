@@ -33,6 +33,7 @@ from ..utils import (
     console,
     detect_package_manager,
     run_command,
+    run_command_teed,
 )
 
 # How to invoke each supported package manager to install a package.
@@ -58,6 +59,21 @@ PACKAGE_MAP = {
     "redis": {"apt": "redis-server", "brew": "redis", "choco": "redis-64"},
 }
 
+def _install_output_shows_failure(output: str) -> bool:
+    """True when a package manager's output admits it installed nothing.
+
+    Some managers (notably scoop) exit 0 after printing an error, so a zero
+    exit code alone can't be trusted.
+    """
+    low = output.lower()
+    return any(sig in low for sig in (
+        "couldn't find manifest",       # scoop: unknown package
+        "no package found matching",    # winget
+        "could not find a package",     # choco phrasing
+        "unable to locate package",     # apt
+    ))
+
+
 # Language runtimes are NOT installed as system packages — they're handled by
 # the per-project version managers (uv for Python, fnm/nvm for Node). A README
 # that lists "Python 3.10+" as a prerequisite must not trigger
@@ -76,6 +92,12 @@ _LINUX_ONLY_PACKAGES = {
     "libffi-dev", "zlib1g-dev", "libxml2-dev", "libxslt1-dev", "libjpeg-dev",
     "libgl1", "libglib2.0-0", "libsm6", "libxext6", "python3-dev", "python3-venv",
     "default-libmysqlclient-dev", "pkg-config", "gcc", "g++", "libgtk-3-dev",
+    # GPU-passthrough / init-system packages a README lists for the project's
+    # Docker/Linux deployment (e.g. Open WebUI's nvidia-container-toolkit) —
+    # they don't exist on Windows/macOS, and scoop's failed lookup exits 0.
+    "nvidia-container-toolkit", "nvidia-docker2", "nvidia-container-runtime",
+    "systemd", "ufw", "apparmor", "selinux", "apt-transport-https",
+    "software-properties-common",
 }
 
 # Normalise common human/README spellings to the package-manager id used below.
@@ -867,9 +889,11 @@ def ensure_packages(
         for manager in managers:
             pkg = resolve_package_name(generic, manager)
             command = [part.replace("{pkg}", pkg) for part in INSTALL_TEMPLATES[manager]]
-            result = run_command(command, capture=False)  # streamed
+            # Stream AND capture: some managers (scoop) exit 0 even when they
+            # found no such package, so success must be checked in the output.
+            result = run_command_teed(command)
             results.append(result)
-            if result.ok:
+            if result.ok and not _install_output_shows_failure(result.stdout or ""):
                 _refresh_path(manager)
                 console.print(f"  [success]Installed {generic} via {manager}.[/success]")
                 installed_ok = True

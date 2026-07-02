@@ -344,3 +344,18 @@ def test_published_package_falls_back_to_source_on_failure(tmp_path, monkeypatch
         vm, "_pip_install", lambda *a: CommandResult("pip install", 1, stderr="boom")
     )
     assert vm._published_package_install("python", tmp_path, None) is None
+    assert not vm.used_published_package(tmp_path)  # no marker on failure
+
+
+def test_published_package_marker_written_on_success(tmp_path, monkeypatch):
+    # The marker tells the rest of the pipeline the wheel IS the app, so the
+    # root npm install and source sub-projects (backend/) are skipped.
+    import devready.environment.version_manager as vm
+    from devready.utils import CommandResult
+
+    _openwebui_like_repo(tmp_path)
+    monkeypatch.setattr(vm, "_pip_install", lambda *a: CommandResult("pip install", 0))
+    assert not vm.used_published_package(tmp_path)
+    result = vm._published_package_install("python", tmp_path, None)
+    assert result is not None and result.ok
+    assert vm.used_published_package(tmp_path)
