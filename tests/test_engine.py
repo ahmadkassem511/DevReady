@@ -281,6 +281,36 @@ def test_resolve_server_command_pnpm_workspace_bin(tmp_path, monkeypatch):
     ]
 
 
+def test_resolve_project_cli_finds_venv_entry_point(tmp_path, monkeypatch):
+    # After a published-package install, the CLI lives in .venv/Scripts (Windows)
+    # or .venv/bin — `open-webui serve` must resolve to that full path.
+    import sys as _sys
+    bin_dir = tmp_path / ".venv" / ("Scripts" if _sys.platform == "win32" else "bin")
+    bin_dir.mkdir(parents=True)
+    exe = bin_dir / ("open-webui.exe" if _sys.platform == "win32" else "open-webui")
+    exe.write_text("")
+    eng = Engine(project_dir=tmp_path)
+    resolved = eng._resolve_project_cli("open-webui serve")
+    assert resolved == [str(exe), "serve"]
+    # Unknown CLI -> None; unsafe -> None.
+    assert eng._resolve_project_cli("other-tool serve") is None
+    assert eng._resolve_project_cli("open-webui serve && rm -rf /") is None
+
+
+def test_has_runnable_web_command_accepts_venv_cli(tmp_path):
+    import sys as _sys
+    bin_dir = tmp_path / ".venv" / ("Scripts" if _sys.platform == "win32" else "bin")
+    bin_dir.mkdir(parents=True)
+    (bin_dir / ("open-webui.exe" if _sys.platform == "win32" else "open-webui")).write_text("")
+    eng = Engine(project_dir=tmp_path)
+    assert eng._has_runnable_web_command(
+        {"has_web_ui": True, "launch_command": "open-webui serve"}
+    ) is True
+    assert eng._has_runnable_web_command(
+        {"has_web_ui": True, "launch_command": "not-installed serve"}
+    ) is False
+
+
 def test_resolve_server_command_unresolvable(tmp_path, monkeypatch):
     import devready.engine as engine_mod
     monkeypatch.setattr(engine_mod, "command_exists", lambda h: False)

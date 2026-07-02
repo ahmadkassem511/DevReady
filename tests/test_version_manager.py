@@ -275,3 +275,72 @@ def test_find_matches_running_interpreter():
     # without consulting any external tool.
     current = f"{sys.version_info.major}.{sys.version_info.minor}"
     assert find_installed_python(current) == sys.executable
+
+
+# -- easiest-install-path resolver (published package over source build) ------
+def _openwebui_like_repo(tmp_path):
+    """A repo like Open WebUI: Python package + bundled JS frontend, whose README
+    documents the official prebuilt install (`pip install open-webui`)."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "open-webui"\nversion = "1.0"\n', encoding="utf-8"
+    )
+    (tmp_path / "package.json").write_text('{"name": "frontend"}')
+    (tmp_path / "README.md").write_text(
+        "## Quick start\n\nInstall via pip:\n\n    pip install open-webui\n"
+    )
+    return tmp_path
+
+
+def test_project_package_name_parses_pyproject(tmp_path):
+    from devready.environment.version_manager import _project_package_name
+
+    _openwebui_like_repo(tmp_path)
+    assert _project_package_name(tmp_path) == "open-webui"
+    assert _project_package_name(tmp_path / "nope") is None
+
+
+def test_published_package_preferred_over_source_build(tmp_path, monkeypatch):
+    import devready.environment.version_manager as vm
+    from devready.utils import CommandResult
+
+    _openwebui_like_repo(tmp_path)
+    calls = []
+
+    def fake_pip_install(venv_python, target_args, project_dir, healer):
+        calls.append(target_args)
+        return CommandResult("pip install", 0)
+
+    monkeypatch.setattr(vm, "_pip_install", fake_pip_install)
+    result = vm._published_package_install("python", tmp_path, None)
+    assert result is not None and result.ok
+    assert calls == [["open-webui"]]  # installed the wheel, not ["."]
+
+
+def test_published_package_skipped_without_readme_mention(tmp_path, monkeypatch):
+    import devready.environment.version_manager as vm
+
+    _openwebui_like_repo(tmp_path)
+    (tmp_path / "README.md").write_text("Build from source with pip install .\n")
+    monkeypatch.setattr(vm, "_pip_install", lambda *a: (_ for _ in ()).throw(AssertionError))
+    assert vm._published_package_install("python", tmp_path, None) is None
+
+
+def test_published_package_skipped_without_js_frontend(tmp_path, monkeypatch):
+    # A plain Python package builds fast from source — no need to special-case.
+    import devready.environment.version_manager as vm
+
+    _openwebui_like_repo(tmp_path)
+    (tmp_path / "package.json").unlink()
+    monkeypatch.setattr(vm, "_pip_install", lambda *a: (_ for _ in ()).throw(AssertionError))
+    assert vm._published_package_install("python", tmp_path, None) is None
+
+
+def test_published_package_falls_back_to_source_on_failure(tmp_path, monkeypatch):
+    import devready.environment.version_manager as vm
+    from devready.utils import CommandResult
+
+    _openwebui_like_repo(tmp_path)
+    monkeypatch.setattr(
+        vm, "_pip_install", lambda *a: CommandResult("pip install", 1, stderr="boom")
+    )
+    assert vm._published_package_install("python", tmp_path, None) is None

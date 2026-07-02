@@ -121,10 +121,90 @@ def setup_python(project_dir: Path, result: DetectionResult, healer=None) -> Lis
             _pip_install(venv_python, ["-r", "requirements.txt"], project_dir, healer)
         )
     elif "pyproject.toml" in result.package_files or "setup.py" in result.package_files:
-        console.print("  Installing project (pip install .)…")
-        outcomes.append(_pip_install(venv_python, ["."], project_dir, healer))
+        # EASIEST-PATH RESOLVER: when the project publishes an official prebuilt
+        # package (its README documents `pip install <its-own-name>`) and building
+        # from source would be heavy (it bundles a JS frontend that source builds
+        # must compile), install the published wheel instead — minutes, not a
+        # 15+-minute Node+ML build. Falls back to `pip install .` if that fails.
+        published = _published_package_install(venv_python, project_dir, healer)
+        if published is not None:
+            outcomes.append(published)
+        else:
+            console.print("  Installing project (pip install .)…")
+            outcomes.append(_pip_install(venv_python, ["."], project_dir, healer))
 
     return outcomes
+
+
+def _project_package_name(project_dir: Path) -> Optional[str]:
+    """The distribution name declared in pyproject.toml's [project] table, or None."""
+    pyproject = project_dir / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    try:
+        text = pyproject.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:  # proper parse when available (Python 3.11+)
+        import tomllib
+        name = tomllib.loads(text).get("project", {}).get("name")
+        return str(name) if name else None
+    except Exception:
+        pass
+    # Regex fallback: the first `name = "..."` after a [project] header.
+    match = re.search(r"^\[project\]\s*$(.*?)^\[", text + "\n[", re.M | re.S)
+    section = match.group(1) if match else ""
+    name_match = re.search(r'^\s*name\s*=\s*["\']([^"\']+)["\']', section, re.M)
+    return name_match.group(1) if name_match else None
+
+
+def _published_package_install(
+    venv_python: str, project_dir: Path, healer
+) -> Optional[CommandResult]:
+    """Install the project's own PUBLISHED package instead of building source.
+
+    Only when all three hold (deliberately conservative):
+      * pyproject.toml names the package;
+      * the README documents installing that exact name from PyPI
+        (``pip install <name>``) — i.e. the project officially ships prebuilt;
+      * a source build would be heavy — the repo bundles a JS frontend
+        (package.json at the root) that ``pip install .`` would have to compile.
+
+    Returns the successful CommandResult, or None to fall back to source
+    (including when the published install fails — source stays the safety net).
+    """
+    name = _project_package_name(project_dir)
+    if not name:
+        return None
+    if not (project_dir / "package.json").exists():
+        return None  # source build isn't the heavy JS+Python kind — just build it
+
+    readme_text = ""
+    for candidate in ("README.md", "README.rst", "README.txt", "README"):
+        readme = project_dir / candidate
+        if readme.exists():
+            try:
+                readme_text = readme.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                readme_text = ""
+            break
+    if not re.search(rf"pip3?\s+install\s+(-U\s+|--upgrade\s+)?{re.escape(name)}\b",
+                     readme_text, re.IGNORECASE):
+        return None
+
+    console.print(
+        f"  This project ships an official prebuilt package — installing "
+        f"[bold]{name}[/bold] from PyPI instead of building from source "
+        f"(much faster; frontend comes pre-built)…"
+    )
+    result = _pip_install(venv_python, [name], project_dir, healer)
+    if result.ok:
+        return result
+    console.print(
+        "  [warning]Published-package install didn't succeed — building from "
+        "source instead.[/warning]"
+    )
+    return None
 
 
 def _pip_install(

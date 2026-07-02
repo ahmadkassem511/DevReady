@@ -1018,20 +1018,16 @@ class Engine:
         parts = cmd_str.split()
         if not parts:
             return None
-        head = parts[0].replace("\\", "/").split("/")[-1].lower()
-        for suffix in (".exe", ".cmd", ".bat"):
-            if head.endswith(suffix):
-                head = head[: -len(suffix)]
-        rest = parts[1:]
+        head = self._command_head(cmd_str)
 
         # Already a real command on PATH (npm/node/python/make/…): run as-is.
         if command_exists(head):
             return parts
 
-        # A project CLI shipped as a root script → run it with node.
-        for entry in (f"{parts[0]}.mjs", f"{parts[0]}.js"):
-            if (self.project_dir / entry).exists():
-                return ["node", entry, *rest]
+        # A CLI the project itself installed (venv bin / root node script).
+        project_cli = self._resolve_project_cli(cmd_str)
+        if project_cli:
+            return project_cli
 
         # A Node project's bin (installed into node_modules/.bin by the workspace
         # install) → invoke via the workspace package manager.
@@ -1042,6 +1038,42 @@ class Engine:
                 return ["pnpm", "exec", *parts]
             if command_exists("npx"):
                 return ["npx", "--no-install", *parts]
+        return None
+
+    @staticmethod
+    def _command_head(cmd_str: str) -> str:
+        """The normalised executable name of a command string (no path/suffix)."""
+        parts = cmd_str.split()
+        head = parts[0].replace("\\", "/").split("/")[-1].lower() if parts else ""
+        for suffix in (".exe", ".cmd", ".bat"):
+            if head.endswith(suffix):
+                head = head[: -len(suffix)]
+        return head
+
+    def _resolve_project_cli(self, cmd_str: str) -> Optional[List[str]]:
+        """Resolve a command whose head is a CLI *this project installed* —
+        a venv-bin entry point (e.g. ``open-webui serve`` after a published-
+        package install) or a root ``<name>.mjs``/``.js`` node script. These are
+        as trusted as the project's own npm scripts, which we already run.
+        Returns argv, or None."""
+        from .ai.guide import is_safe_server_command
+
+        if not is_safe_server_command(cmd_str):
+            return None
+        parts = cmd_str.split()
+        if not parts:
+            return None
+        head, rest = self._command_head(cmd_str), parts[1:]
+
+        venv_bin = self.project_dir / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
+        for candidate in ((f"{head}.exe", head) if sys.platform == "win32" else (head,)):
+            exe = venv_bin / candidate
+            if exe.exists():
+                return [str(exe), *rest]
+
+        for entry in (f"{parts[0]}.mjs", f"{parts[0]}.js"):
+            if (self.project_dir / entry).exists():
+                return ["node", entry, *rest]
         return None
 
     def _launch_targets(
@@ -1668,11 +1700,17 @@ class Engine:
         )
 
     def _has_runnable_web_command(self, guide: dict) -> bool:
-        """True if the guide gives a safe, documented command to start a web app."""
+        """True if the guide gives a safe, documented command to start a web app.
+
+        Accepts a known run tool (npm/make/python/…) or a CLI this project
+        itself installed (venv entry point / root node script) — e.g.
+        ``open-webui serve`` after a published-package install."""
         from .ai.guide import is_safe_launch_command
 
         cmd = (guide.get("launch_command") or "").strip()
-        return bool(guide.get("has_web_ui") and cmd and is_safe_launch_command(cmd))
+        if not (guide.get("has_web_ui") and cmd):
+            return False
+        return is_safe_launch_command(cmd) or self._resolve_project_cli(cmd) is not None
 
     # Generic task runners that often shell out to docker internally.
     _DOCKER_WRAPPER_RUNNERS = ("make", "just", "task", "mvnw", "gradlew", "rake")
@@ -1711,7 +1749,14 @@ class Engine:
         if not guide.get("has_web_ui"):
             return []
         cmd_str = (guide.get("launch_command") or "").strip()
-        if not cmd_str or not is_safe_launch_command(cmd_str):
+        if not cmd_str:
+            return []
+        # A known run tool passes as-is; a project-installed CLI (venv entry
+        # point / root node script) is resolved to a launchable argv.
+        launch_argv = cmd_str.split() if is_safe_launch_command(cmd_str) else None
+        if launch_argv is None:
+            launch_argv = self._resolve_project_cli(cmd_str)
+        if launch_argv is None:
             return []
         if cmd_str in self._attempted_commands:
             return []  # don't re-run the same command the heuristic already tried
@@ -1758,7 +1803,7 @@ class Engine:
         target = {
             "name": "root",
             "cwd": str(self.project_dir),
-            "command": cmd_str.split(),
+            "command": launch_argv,
             "port": port,
         }
         return self._launch_targets(
