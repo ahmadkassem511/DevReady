@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devready"
-version = "0.23.1"
+version = "0.23.2"
 description = "Set up any cloned project with a single command: devready start"
 readme = "README.md"
 requires-python = ">=3.9"

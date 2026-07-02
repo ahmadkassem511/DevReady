@@ -165,8 +165,17 @@ class JobManager:
                         job,
                         f"→ {target} exists but has no recognizable project files — re-cloning.",
                     )
-                    import shutil
-                    shutil.rmtree(target, ignore_errors=True)
+                    from ..utils import force_rmtree
+                    # Robustly clear the leftover (e.g. a read-only .git from a
+                    # partial delete), or `git clone` fails on the non-empty dir.
+                    if not force_rmtree(target):
+                        job.status = "error"
+                        self._emit(
+                            job,
+                            f"✗ Couldn't clear the existing folder {target}. Close any "
+                            "program using it (or delete it manually), then retry.",
+                        )
+                        return
                     self._emit(job, f"→ Cloning {job.repo_url} …")
                     code = self._stream(
                         ["git", "clone", "--depth", "1", job.repo_url, str(target)], job

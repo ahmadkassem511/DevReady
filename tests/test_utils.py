@@ -1,8 +1,28 @@
 """Tests for shared subprocess helpers."""
 
+import os
+import stat
 import sys
 
-from devready.utils import run_command_teed
+from devready.utils import force_rmtree, run_command_teed
+
+
+def test_force_rmtree_deletes_readonly_git_files(tmp_path):
+    # Simulate git's read-only pack files, which defeat plain shutil.rmtree on
+    # Windows and leave the .git folder behind.
+    proj = tmp_path / "proj"
+    objects = proj / ".git" / "objects" / "pack"
+    objects.mkdir(parents=True)
+    pack = objects / "pack-abc.idx"
+    pack.write_text("data")
+    os.chmod(pack, stat.S_IREAD)  # read-only
+
+    assert force_rmtree(proj) is True
+    assert not proj.exists()
+
+
+def test_force_rmtree_missing_path_is_ok(tmp_path):
+    assert force_rmtree(tmp_path / "does-not-exist") is True
 
 
 def test_teed_captures_and_streams(capsys):

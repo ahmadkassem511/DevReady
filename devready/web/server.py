@@ -255,21 +255,10 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
         File deletion is only allowed inside the DevReady workspace, so we can
         never rmtree an arbitrary path the registry happens to contain.
         """
-        import shutil
-        import stat
-
         from ..config import unregister_project
         from ..engine import Engine
+        from ..utils import force_rmtree
         from .jobs import workspace_dir
-
-        def _rmtree_error(func, path, exc_info):
-            """Retry removing a file with relaxed permissions — Windows often
-            marks files under node_modules as read-only, which blocks rmtree."""
-            try:
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
-            except Exception:
-                pass  # will be detected by the exists() check below
 
         body = await request.json()
         path = (body.get("path") or "").strip()
@@ -291,18 +280,16 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
                 Engine(project_dir=target).stop()  # stop anything running first
             except Exception:
                 pass
-            # Windows: rmtree often fails on node_modules (long paths, symlinks).
-            # Use the longest possible path prefix to avoid MAX_PATH issues.
-            shutil.rmtree(target, ignore_errors=False, onerror=_rmtree_error)
-            if target.exists():
-                # Some files couldn't be deleted — warn the user and leave the
+            # Robust delete: clears read-only .git pack files and retries transient
+            # AV/indexer locks — plain rmtree leaves the folder behind on Windows.
+            if not force_rmtree(target):
+                # Still couldn't fully delete — warn the user and leave the
                 # registry entry so they can retry or delete manually.
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"Could not fully delete {target}. Some files may be in use "
-                        "or have protected permissions. Delete the folder manually "
-                        "and try again."
+                        f"Could not fully delete {target}. Some files may be open in "
+                        "another program (close it) — then try again."
                     ),
                 )
 

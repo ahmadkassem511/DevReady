@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -299,6 +300,38 @@ def run_command_teed(
     return CommandResult(
         command=display, returncode=process.returncode, stdout="".join(captured)
     )
+
+
+def force_rmtree(path: "Path | str", attempts: int = 3) -> bool:
+    """Recursively delete a directory tree, robustly. Returns True if it's gone.
+
+    Plain ``shutil.rmtree`` routinely fails on Windows because Git writes its
+    ``.git/objects`` pack files as **read-only** — rmtree hits a PermissionError
+    partway and leaves the folder behind (which then makes a fresh ``git clone``
+    into it fail with "already exists and is not empty"). This proactively clears
+    the read-only bit on every entry first, then deletes, and retries a few times
+    to outlast transient locks from antivirus / the search indexer.
+    """
+    target = Path(path)
+    for _ in range(max(1, attempts)):
+        if not target.exists():
+            return True
+        # Clear read-only across the whole tree so nothing can block removal.
+        for root, dirs, files in os.walk(target):
+            for name in dirs + files:
+                try:
+                    os.chmod(os.path.join(root, name), stat.S_IWRITE)
+                except OSError:
+                    pass
+        try:
+            os.chmod(target, stat.S_IWRITE)
+        except OSError:
+            pass
+        shutil.rmtree(target, ignore_errors=True)
+        if not target.exists():
+            return True
+        time.sleep(0.5)  # let an AV/indexer release its handle, then retry
+    return not target.exists()
 
 
 def command_exists(name: str) -> bool:
