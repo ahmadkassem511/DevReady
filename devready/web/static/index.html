@@ -105,6 +105,25 @@
     .steps li { margin-bottom: 6px; }
     .hidden { display: none !important; }
     .empty { text-align: center; color: var(--muted); padding: 60px 0; }
+    .spinner {
+      width: 14px; height: 14px; border-radius: 50%; display: inline-block;
+      vertical-align: -2px; margin-right: 8px;
+      border: 2px solid var(--muted); border-top-color: transparent;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .card.busy { opacity: .85; }
+    .card-busy { display: flex; align-items: center; font-size: 14px; margin-top: 6px; }
+    .toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: var(--surface-2); border: 1px solid var(--border, #333);
+      color: var(--text, #eee); padding: 12px 18px; border-radius: 8px;
+      font-size: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.4); z-index: 1000;
+      max-width: 90vw; opacity: 0; transition: opacity .2s; pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+    .toast.ok { border-color: var(--green); }
+    .toast.err { border-color: var(--red); }
     code { background: var(--surface-2); padding: 2px 6px; border-radius: 5px; font-size: 13px; }
   </style>
 </head>
@@ -578,10 +597,10 @@
           buttons += `<button class="btn secondary" onclick="stopProject('${enc}')">Stop</button>`;
         } else if (p.status === "stopped") {
           buttons += `<button class="btn" onclick="startProject('${enc}','${esc(p.name)}')">Run</button>`;
-          buttons += `<button class="btn secondary" onclick="removeProject('${enc}', false)">Remove</button>`;
-          buttons += `<button class="btn danger" onclick="removeProject('${enc}', true)">Delete files</button>`;
+          buttons += `<button class="btn secondary" onclick="removeProject(this, '${enc}', '${esc(p.name)}', false)">Remove</button>`;
+          buttons += `<button class="btn danger" onclick="removeProject(this, '${enc}', '${esc(p.name)}', true)">Delete files</button>`;
         } else { // missing
-          buttons += `<button class="btn secondary" onclick="removeProject('${enc}', false)">Remove from list</button>`;
+          buttons += `<button class="btn secondary" onclick="removeProject(this, '${enc}', '${esc(p.name)}', false)">Remove from list</button>`;
         }
         return `
         <div class="card">
@@ -608,15 +627,32 @@
       loadLibrary();
     }
 
-    async function removeProject(encPath, deleteFiles) {
+    async function removeProject(btn, encPath, name, deleteFiles) {
       const path = decodeURIComponent(encPath);
       const msg = deleteFiles
         ? `Permanently delete this project and its folder?\n\n${path}\n\nThis cannot be undone.`
         : `Remove this project from My Projects?\n\nIts files stay on disk — you're just removing it from the list.`;
       if (!confirm(msg)) return;
+
+      // Show clear in-card progress: deleting a heavy project (big node_modules,
+      // .venv, .git) can take a while, so replace the buttons with a spinner and
+      // a message instead of leaving the click looking like nothing happened.
+      const card = btn && btn.closest(".card");
+      const actions = card && card.querySelector(".actions");
+      if (card && actions) {
+        card.classList.add("busy");
+        const verb = deleteFiles ? "Deleting files" : "Removing";
+        actions.innerHTML =
+          `<span class="card-busy"><span class="spinner"></span>` +
+          `${verb} — this can take a moment for large projects…</span>`;
+      }
+
       try {
         await api("/api/projects", { method: "DELETE", body: JSON.stringify({ path, delete_files: deleteFiles }) });
-      } catch (e) { alert("✗ " + e); }
+        showToast(deleteFiles ? `✓ Deleted ${name}.` : `✓ Removed ${name}.`, "ok");
+      } catch (e) {
+        showToast("✗ " + (deleteFiles ? "Couldn't delete " : "Couldn't remove ") + name + ": " + e, "err");
+      }
       loadLibrary();
     }
 
@@ -653,6 +689,20 @@
     }
 
     function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+    let _toastTimer = null;
+    function showToast(message, kind) {
+      let el = document.getElementById("toast");
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "toast"; el.className = "toast";
+        document.body.appendChild(el);
+      }
+      el.textContent = message;
+      el.className = "toast " + (kind || "") + " show";
+      clearTimeout(_toastTimer);
+      _toastTimer = setTimeout(() => { el.className = "toast " + (kind || ""); }, 4000);
+    }
 
     init();
   </script>
