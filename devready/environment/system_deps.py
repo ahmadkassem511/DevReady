@@ -600,8 +600,13 @@ def _start_docker_daemon() -> bool:
         return False
     if sys.platform == "darwin":
         return run_command(["open", "-a", "Docker"]).ok
-    # Linux: try the service manager (needs privileges; harmless if denied).
-    return run_command(["sudo", "systemctl", "start", "docker"]).ok
+    # Linux: try the service manager. `-n` = never prompt for a password — a
+    # sudo prompt would hang forever under the GUI (no terminal). If sudo isn't
+    # passwordless, we simply wait for the user to start the daemon themselves.
+    if run_command(["sudo", "-n", "systemctl", "start", "docker"]).ok:
+        return True
+    # Rootless-docker setups manage the daemon as a user unit — no sudo needed.
+    return run_command(["systemctl", "--user", "start", "docker"]).ok
 
 
 def _docker_install_guidance() -> List[str]:
@@ -662,9 +667,27 @@ def ensure_docker(
                 console.print(f"  {line}")
         return False
 
+    # Linux: "permission denied" on the socket means the DAEMON IS RUNNING and
+    # the user just isn't in the docker group — starting/waiting/"install
+    # Docker" advice would all be wrong. Give the actual one-time fix.
+    probe = run_command(["docker", "info"])
+    if not probe.ok and "permission denied" in (probe.stderr + probe.stdout).lower():
+        console.print(
+            "  [warning]Docker is installed and running, but your user can't access it "
+            "(permission denied on the Docker socket). Fix it once with:[/warning]\n"
+            "      sudo usermod -aG docker $USER\n"
+            "  then log out and back in (or run `newgrp docker`), and run DevReady again."
+        )
+        return False
+
     # Installed but the engine may be stopped — start it and wait (with progress).
     started = _start_docker_daemon()
     if started:
+        # We JUST launched the engine app ourselves; its boot (WSL VM on Windows)
+        # can exceed the caller's default wait on slower machines — seen live:
+        # giving up at 180s while the engine came up moments later, producing a
+        # contradictory "no engine available" + a working app.
+        wait_seconds = max(wait_seconds, 300)
         console.print(
             "  Starting Docker Desktop — the engine can take a few minutes to come up "
             "on first start. Waiting…"

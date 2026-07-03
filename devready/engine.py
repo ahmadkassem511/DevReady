@@ -241,6 +241,18 @@ class Engine:
                 for p in saved if p.get("command")
             ]
             if targets:
+                # A docker/compose launch is doomed without an engine — don't
+                # run it just to print a confusing "started but not serving".
+                # (_ensure_runtime is cached, so no double engine-wait.)
+                if any(self._argv_needs_docker(t["command"]) for t in targets):
+                    runtime, _ = self._ensure_runtime()
+                    if not runtime:
+                        console.print(
+                            "  [warning]This project runs in Docker and no container "
+                            "engine is available — follow the steps above, then run "
+                            "this again.[/warning]"
+                        )
+                        return
                 served = self._launch_targets(targets)
                 if not served:
                     self._no_server_help()  # explain how to use it (no served URL)
@@ -1100,6 +1112,17 @@ class Engine:
         return None
 
     @staticmethod
+    def _argv_needs_docker(command: List[str]) -> bool:
+        """True if a launch argv is a container-engine command (docker/compose/podman)."""
+        if not command:
+            return False
+        head = Path(command[0]).name.lower()
+        for suffix in (".exe", ".cmd", ".bat"):
+            if head.endswith(suffix):
+                head = head[: -len(suffix)]
+        return head in ("docker", "docker-compose", "podman")
+
+    @staticmethod
     def _docker_container_name(command: List[str]) -> Optional[str]:
         """The ``--name`` of a ``docker run`` launch command, or None.
 
@@ -1194,7 +1217,7 @@ class Engine:
         # the next `devready run` relaunches the SAME documented commands
         # instead of falling back to guessing.
         state = self._read_state()
-        self._write_state(
+        fields = dict(
             processes=records,
             docker=state.get("docker", False),
             docker_containers=containers or state.get("docker_containers", []),
@@ -1203,6 +1226,12 @@ class Engine:
                 for r in records
             ],
         )
+        # A docker-based launch that's actually serving proves the engine works
+        # — clear any earlier "no engine available" verdict so the CLI summary
+        # and the GUI stop telling the user to install Docker.
+        if any(r.get("port") and self._argv_needs_docker(r.get("command") or []) for r in records):
+            fields["needs_container_engine"] = False
+        self._write_state(**fields)
         return self._announce_running(records)
 
     def _pinned_node_bin_dir(self) -> Optional[str]:

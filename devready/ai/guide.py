@@ -27,7 +27,12 @@ GUIDE_SYSTEM_PROMPT = (
     '  "has_web_ui": boolean — true only if it runs as a site/app opened in a browser,\n'
     '  "launch_command": the SINGLE shell command that starts the app/server '
     "(e.g. \"make dev\", \"npm start\", \"docker compose up\"), or an empty string "
-    "if there isn't one. Must be one command — no '&&', pipes, or 'cd'.\n"
+    "if there isn't one. Must be one command — no '&&', pipes, or 'cd'. "
+    "For a documented `docker run`, copy it COMPLETE: keep every flag exactly as "
+    "the README shows (-e environment variables, every -p port, -v volumes, "
+    "--shm-size, the exact image tag), flattening multi-line backslash "
+    "continuations into one line. NEVER drop flags to simplify — omitting a "
+    "documented -e (e.g. a password) ships a broken app.\n"
     '  "url": the local URL the app serves on once started (e.g. '
     '"http://localhost:8080"), or an empty string,\n'
     '  "server_command": if this project is primarily a long-running SERVER, '
@@ -41,7 +46,9 @@ GUIDE_SYSTEM_PROMPT = (
     '"gh auth login", "foo init"); else an empty string. One command, no operators.\n'
     '  "steps": array of short, concrete, copy-pasteable steps to run or use it '
     "(include the actual commands; assume deps are already installed so do NOT "
-    "include install steps),\n"
+    "include install steps). If the app has a login screen, one step MUST state "
+    "the documented default username/password (or how they're set, e.g. which "
+    "-e variables),\n"
     '  "tips": one short sentence on prerequisites or what to do next (e.g. needs a '
     "database/API key), or an empty string.\n"
     "Prefer the project's own documented commands. If it's a library, make the "

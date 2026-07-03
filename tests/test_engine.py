@@ -319,6 +319,33 @@ def test_resolve_server_command_unresolvable(tmp_path, monkeypatch):
     assert eng._resolve_server_command("openclaw gateway run") is None
 
 
+def test_argv_needs_docker(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    assert eng._argv_needs_docker(["docker", "run", "-p", "8080:8080", "img"]) is True
+    assert eng._argv_needs_docker(["docker-compose", "up"]) is True
+    assert eng._argv_needs_docker(["podman", "run", "img"]) is True
+    assert eng._argv_needs_docker(["npm", "run", "dev"]) is False
+    assert eng._argv_needs_docker([]) is False
+
+
+def test_run_blocks_docker_relaunch_without_engine(tmp_path, monkeypatch):
+    # Seen live (neko): `devready run` printed "No container engine available"
+    # and then launched `docker run …` anyway — doomed, and the output
+    # contradicted itself. Without an engine, a docker relaunch must not spawn.
+    eng = Engine(project_dir=tmp_path)
+    eng._write_state(last_launch=[{
+        "name": "root", "cwd": str(tmp_path),
+        "command": ["docker", "run", "-p", "8080:8080", "m1k1o/neko"], "port": 8080,
+    }])
+    monkeypatch.setattr(eng, "_bring_up_services", lambda **k: None)
+    monkeypatch.setattr(eng, "_ensure_runtime", lambda: (None, None))
+    monkeypatch.setattr(
+        eng, "_launch_targets",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not launch without an engine")),
+    )
+    eng.run()  # returns after the warning — no launch attempted
+
+
 def test_docker_container_name_extraction(tmp_path):
     eng = Engine(project_dir=tmp_path)
     assert eng._docker_container_name(
@@ -395,6 +422,7 @@ def test_relaunch_existing_container_uses_docker_start(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "_docker_container_exists", lambda name, env=None: True)
     monkeypatch.setattr(eng, "_announce_running", lambda records: ["http://localhost:8088"])
 
+    eng._write_state(needs_container_engine=True)  # stale verdict from services step
     original = ["docker", "run", "-d", "-p", "8088:80", "--name", "welcome", "img"]
     eng._launch_targets([{"name": "root", "cwd": str(tmp_path), "command": original, "port": 8088}])
 
@@ -405,6 +433,9 @@ def test_relaunch_existing_container_uses_docker_start(tmp_path, monkeypatch):
     # recreated, and `last_launch` survives `devready stop` for relaunching.
     assert state["processes"][0]["command"] == original
     assert state["last_launch"][0]["command"] == original
+    # A serving docker launch proves the engine works — the stale "install
+    # Docker" verdict must be cleared so the CLI/GUI stop contradicting reality.
+    assert state["needs_container_engine"] is False
 
 
 def test_subprojects_skipped_after_published_install(tmp_path, monkeypatch):

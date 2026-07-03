@@ -8,10 +8,13 @@
 
 `git clone` → `cd project` → **`devready start`** → done.
 
+[![CI](https://github.com/ahmadkassem511/DevReady/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmadkassem511/DevReady/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.9-blue.svg)](https://www.python.org/)
 [![GitHub stars](https://img.shields.io/github/stars/ahmadkassem511/DevReady?style=social)](https://github.com/ahmadkassem511/DevReady)
 [![GitHub issues](https://img.shields.io/github/issues/ahmadkassem511/DevReady)](https://github.com/ahmadkassem511/DevReady/issues)
+
+Tested on **Windows, macOS, and Linux** (Python 3.9–3.12) on every commit.
 
 </div>
 
@@ -54,11 +57,11 @@ nine steps:
 | 2. **Read the README** | Uses a **free** LLM (via OpenRouter) — or an offline parser — to extract install commands, system packages, env vars, and DB steps. If the chosen free model is rate-limited or retired, DevReady automatically tries others and even queries OpenRouter's live model list to find a working free one. |
 | 3. **Check compatibility** | Detects your hardware (CPU cores, RAM, free disk, GPU) and compares it against the requirements it read from the README. A **truly required** but missing GPU (e.g. the project explicitly needs a CUDA-capable card) is flagged before you waste time installing; low RAM or few cores are shown as **warnings**, not blocks. CUDA is only treated as required on explicit phrasing — a passing mention of "tested on NVIDIA" or "CUDA optional" won't wrongly block a non-NVIDIA machine. In the GUI there's a **Check Hardware** button and a **Continue Anyway** option. |
 | 4. **System packages** | Offers to install OS-level dependencies (ffmpeg, postgres…) via `brew`/`apt`/`winget`/`scoop`/`choco`, with your permission. Cleans up README-style names (`Node.js 18+` → `nodejs`) and skips language runtimes — those are handled per-project in step 5. Package-manager choice is **elevation-aware** (prefers no-admin managers like winget/scoop, and only uses choco when running elevated, so it never hangs on an admin prompt). |
-| 5. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. **If a required tool or toolchain isn't installed, DevReady installs it for you and continues** — the runner (`make`/`just`/`task`), Node (via the package manager; `yarn`/`pnpm` provisioned through corepack), or a missing language toolchain (Rust, Go, Ruby, PHP, Java/Maven/Gradle, .NET) via `brew`/`apt`/`choco`/etc. Otherwise it does language-native setup: Python (correct version via [uv](https://github.com/astral-sh/uv) + isolated `.venv` + pip), Node (picks `npm`/`yarn`/`pnpm` from the lockfile), Rust (`cargo build`), Go (`go mod download`), Ruby (`bundle install`), PHP (`composer install`), Java (Maven/Gradle), .NET (`dotnet restore`). Git **submodules** are initialised, and **monorepos** are handled too — sub-projects in subdirectories (e.g. a `frontend/` Node app) are detected and set up as well. When a step fails, the **self-healing loop** kicks in (see below). |
+| 5. **Setup** | **Uses the project's own setup method when it ships one** — `make setup`, `setup.sh`, `task setup`, or `just setup` — asking before it runs anything from the repo. **If a required tool or toolchain isn't installed, DevReady installs it for you and continues** — the runner (`make`/`just`/`task`), Node (via the package manager; `yarn`/`pnpm` provisioned through corepack), or a missing language toolchain (Rust, Go, Ruby, PHP, Java/Maven/Gradle, .NET) via `brew`/`apt`/`choco`/etc. Otherwise it does language-native setup: Python (correct version via [uv](https://github.com/astral-sh/uv) + isolated `.venv` + pip), Node (picks `npm`/`yarn`/`pnpm` from the lockfile), Rust (`cargo build`), Go (`go mod download`), Ruby (`bundle install`), PHP (`composer install`), Java (Maven/Gradle), .NET (`dotnet restore`). Git **submodules** are initialised, and **monorepos** are handled too — sub-projects in subdirectories (e.g. a `frontend/` Node app) are detected and set up as well, while **JS workspace members are never re-installed individually** (the root install already wired them). **Easiest-path installs:** when a project officially ships a prebuilt package (its own README documents `pip install <its-name>`) and building from source would mean compiling a bundled JS frontend, DevReady installs the **published wheel instead** — minutes instead of a 15+-minute source build — and skips the now-redundant frontend/sub-project builds (falling back to source automatically if the wheel fails). Long quiet steps print a **heartbeat** ("still working — 3 min elapsed…") so big builds never look frozen. When a step fails, the **self-healing loop** kicks in (see below). |
 | 6. **Environment** | Generates a `.env` from `.env.example` + README hints, with safe random secrets for local dev. |
-| 7. **Services** | If a `docker-compose.yml` exists, DevReady ensures a **container runtime** is available (Docker Desktop, or a Podman fallback) and starts the services — auto-selecting a Compose **profile** when every service is profile-gated. |
+| 7. **Services** | If a `docker-compose.yml` exists, DevReady ensures a **container runtime** is available and starts the services — auto-selecting a Compose **profile** when every service is profile-gated. Engine handling is genuinely cross-platform: it finds and starts **Docker Desktop** (Windows/macOS) and waits patiently through its first boot, starts the daemon via systemd on Linux (never hanging on a sudo prompt), diagnoses the classic Linux *"permission denied on the Docker socket"* with the exact one-line `usermod` fix, and falls back to **Podman** (a no-admin engine) with a transparent `docker`→`podman` shim when Docker isn't an option. |
 | 8. **Migrations** | Detects and runs migrations (Django, Alembic, Knex, Prisma, Rails, Laravel…) with the project's `.env` loaded. |
-| 9. **Launch** | Picks the right start command for the framework (Streamlit, Django, FastAPI, Flask, or your npm `dev`/`start` script), **waits until the server actually responds** (polling HTTP for up to 90s for slow first-compile frameworks like Next.js), then prints and opens the URL — e.g. `http://localhost:8501`. **Monorepos** start every component together (e.g. backend on 8000 + frontend on 3000). For CLI/library/pipeline projects with no web server, it instead shows you how to run it. |
+| 9. **Launch** | Runs the project's **documented** way to start — read from its own README — whether that's a framework command (Streamlit, Django, FastAPI, Flask, npm `dev`/`start`), a CLI the project just installed into its venv (e.g. `open-webui serve`), or a **`docker run` app** (launched with *every* documented flag, including `-e` credentials and ports, so logins work out of the box). It **waits until the server actually responds**, and keeps waiting while the app is visibly still working (first boots that download ML models or seed data get up to 10 minutes instead of a premature "not serving"). **Docker apps are managed as containers**: `stop` stops the container, `run` restarts it instantly with `docker start`, and `status` reports the container's real state. **Monorepos** start every component together. Projects needing a **one-time interactive setup** (onboarding/login) get the exact command to run surfaced prominently. For CLI/library/pipeline projects with no web server, a plain-language usage guide is shown instead. |
 
 Every step is **non-destructive and asks before changing your system** where it
 matters (use `--yes` to accept all prompts for unattended runs). DevReady is
@@ -118,10 +121,21 @@ touching the keyboard:
   installed, DevReady offers to install **Docker Desktop** (or fall back to
   **Podman**) and wires up a `docker`→`podman` shim so Compose still works. The
   GUI shows an **Install Docker** banner when a reboot/admin step is required.
+  Once an engine is up, DevReady never launches a doomed docker command without
+  it, and never keeps telling you to "install Docker" while your container is
+  demonstrably serving.
+- **The fastest correct install path.** When a project's own README documents an
+  official prebuilt package, DevReady uses it instead of grinding through a
+  heavy source build — and verifies installer claims instead of trusting exit
+  codes (some package managers report success after installing nothing).
+- **Deletes that actually delete.** Removing a project (CLI or GUI **Delete
+  files**) clears Git's read-only object files that defeat a normal delete on
+  Windows — no more leftover `.git` folders breaking the next install.
 - **Honest about hard limits.** Some things can't be made zero-touch — a repo
   pinned to a deleted submodule commit, a GPU-only dependency on a CPU box, or
   Docker needing admin + reboot on Windows. DevReady does the maximum it safely
-  can and then **tells you plainly** what's left and why.
+  can and then **tells you plainly** what's left and why (including the exact
+  command to run when a one-time interactive step is genuinely yours to do).
 
 ## Installation (developers / CLI)
 
@@ -159,7 +173,7 @@ for how to get a free key in three steps.
 **Verify it installed:**
 
 ```bash
-devready --version      # e.g. "DevReady 0.5.0"
+devready --version      # e.g. "DevReady 0.26.0"
 devready doctor         # shows which toolchains DevReady can see
 ```
 
@@ -277,11 +291,11 @@ export OPENROUTER_API_KEY="sk-or-..."
 | Command | Description |
 |---------|-------------|
 | `devready start [path] [--yes]` | Run the full detect → set up → launch pipeline. **Use this the first time** (and after `git pull`). Add `--yes`/`-y` for an unattended run that accepts every prompt. |
-| `devready run [path]` | **Relaunch a set-up project — fast.** Skips all setup and relaunches every saved component. Use this every day after the first `start`. |
+| `devready run [path]` | **Relaunch a set-up project — fast.** Skips all setup and relaunches every saved component with the same documented commands (they survive `stop`). Docker apps restart via `docker start` — instant, no duplicate containers. |
 | `devready ui [--no-browser]` | **Launch the browser GUI** — the easy, click-to-install app. Starts a local server (127.0.0.1 only) and opens it in your browser. Requires the `ui` extra (`pip install ".[ui]"`). |
 | `devready list` | List every project DevReady has set up, with its run status and URLs. |
-| `devready status [path]` | Show run state and URL(s) for each component. |
-| `devready stop [path]` | Stop the launched server and any started services. |
+| `devready status [path]` | Show run state and URL(s) for each component — including the real state of app **containers** (works on the Podman fallback too). |
+| `devready stop [path]` | Stop the launched server, any started services, and any app **containers** DevReady launched. |
 | `devready clean [path]` | Remove DevReady-managed artifacts (`.venv`, state). |
 | `devready doctor [path]` | Diagnose your toolchain and configuration — and, inside a project, show its **requirement plan**: what it needs vs. what's installed, and what DevReady will set up, *before* you run `start`. |
 | `devready config show` | Print the current configuration (key masked). |
@@ -408,7 +422,7 @@ single, clear job:
 ```
 devready/
 ├── cli.py                 # Thin Typer CLI — parses args, delegates to Engine.
-├── engine.py              # Orchestrates the 8-step pipeline + status/stop/clean/doctor.
+├── engine.py              # Orchestrates the nine-step pipeline + run/status/stop/clean/doctor.
 ├── config.py              # Read/write ~/.devready/config.json (the only place that does).
 ├── utils.py               # Shared console, safe subprocess runner, OS/package-manager detection.
 ├── detectors/             # "What is this project?"

@@ -348,6 +348,33 @@ def test_ensure_packages_scoop_manifest_miss_is_failure(monkeypatch):
     assert "Couldn't install nope" in blob       # honest outcome
 
 
+def test_ensure_docker_diagnoses_socket_permission_denied(monkeypatch):
+    # Linux: the daemon runs but the user isn't in the docker group. Waiting
+    # for the "engine" or advising an install would both be wrong — the fix is
+    # the one-time usermod, and we must return fast, not after a 5-min wait.
+    import devready.environment.system_deps as sd
+    from devready.utils import CommandResult
+
+    monkeypatch.setattr(sd, "docker_ready", lambda: False)
+    monkeypatch.setattr(sd, "command_exists", lambda n: n == "docker")
+    monkeypatch.setattr(
+        sd, "run_command",
+        lambda cmd, **k: CommandResult(
+            "docker info", 1,
+            stderr="permission denied while trying to connect to the Docker daemon socket",
+        ),
+    )
+    monkeypatch.setattr(
+        sd, "_start_docker_daemon",
+        lambda: (_ for _ in ()).throw(AssertionError("must not try to start the daemon")),
+    )
+    messages = []
+    monkeypatch.setattr(sd.console, "print", lambda *a, **k: messages.append(" ".join(str(x) for x in a)))
+
+    assert sd.ensure_docker(install_if_missing=False) is False
+    assert "usermod -aG docker" in " ".join(messages)
+
+
 def test_docker_in_tool_packages():
     from devready.environment.system_deps import TOOL_PACKAGES
 
