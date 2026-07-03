@@ -480,6 +480,62 @@ def test_relaunch_existing_container_uses_docker_start(tmp_path, monkeypatch):
     assert state["needs_container_engine"] is False
 
 
+def test_src_tauri_subproject_skipped(tmp_path, monkeypatch):
+    # NextChat-style repo: Next.js web app + src-tauri desktop packaging.
+    # Building the Tauri shell needs MSVC/WebView2 and is NOT needed to run
+    # the web app — it must be skipped, not attempted-and-failed.
+    import devready.engine as engine_mod
+
+    (tmp_path / "package.json").write_text('{"name": "nextchat"}')
+    tauri = tmp_path / "src-tauri"
+    tauri.mkdir()
+    (tauri / "Cargo.toml").write_text('[package]\nname = "app"\n')
+
+    eng = Engine(project_dir=tmp_path)
+    monkeypatch.setattr(
+        engine_mod.version_manager, "setup_environment",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not build src-tauri")),
+    )
+    eng._setup_subprojects()  # skips src-tauri, never calls setup
+    # And the launch side must not offer `cargo run` for the desktop shell.
+    assert eng._is_tauri_packaging_dir(tauri) is True
+    assert eng._is_tauri_packaging_dir(tmp_path / "frontend") is False
+
+
+def test_resolve_launch_command_heals_stale_path(tmp_path, monkeypatch):
+    # Seen live (NextChat): the GUI server's PATH predated the Node install, so
+    # `npm run dev` -> WinError 2. When argv[0] doesn't resolve, the launcher
+    # must refresh PATH from the registry/common dirs and re-resolve.
+    import devready.engine as engine_mod
+
+    eng = Engine(project_dir=tmp_path)
+    monkeypatch.setattr(engine_mod.sys, "platform", "win32")
+
+    calls = {"refreshed": False}
+
+    def fake_resolve(command, path=None):
+        if calls["refreshed"]:
+            return [r"C:\nodejs\npm.CMD", *command[1:]]
+        return command  # unresolved before the refresh
+
+    def fake_refresh():
+        calls["refreshed"] = True
+
+    monkeypatch.setattr(engine_mod, "_resolve_windows_executable", fake_resolve)
+    import devready.environment.system_deps as sd
+    monkeypatch.setattr(sd, "refresh_path", fake_refresh)
+
+    env = {"PATH": r"C:\stale", "npm_config_script_shell": "bash"}
+    resolved, new_env = eng._resolve_launch_command(["npm", "run", "dev"], env)
+
+    assert resolved[0] == r"C:\nodejs\npm.CMD"
+    assert calls["refreshed"] is True
+    # env PATH extended so npm's own child (node) resolves inside the launch.
+    assert new_env["PATH"].startswith(r"C:\stale")
+    assert len(new_env["PATH"]) > len(r"C:\stale")
+    assert new_env["npm_config_script_shell"] == "bash"  # other keys preserved
+
+
 def test_subprojects_skipped_after_published_install(tmp_path, monkeypatch):
     # Once the official published package is installed, the source tree's
     # components (e.g. Open WebUI's backend/) are the code the wheel already

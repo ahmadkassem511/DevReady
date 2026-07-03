@@ -238,7 +238,11 @@ class Engine:
                  "cwd": p.get("cwd", str(self.project_dir)),
                  "command": p["command"],
                  "port": p.get("port")}
-                for p in saved if p.get("command")
+                for p in saved
+                if p.get("command")
+                # State saved before the Tauri fix may still carry a `cargo run`
+                # for the desktop shell — never replay it (not the web app).
+                and not self._is_tauri_packaging_dir(Path(p.get("cwd") or self.project_dir))
             ]
             if targets:
                 # A docker/compose launch is doomed without an engine — don't
@@ -504,6 +508,18 @@ class Engine:
         for subdir, results in subprojects:
             rel = subdir.relative_to(self.project_dir).as_posix()
 
+            # Tauri desktop packaging (src-tauri/) is NOT needed to run the web
+            # app `devready start` delivers — building it needs the MSVC
+            # toolchain + WebView2 SDK and takes many minutes, and its failure
+            # (seen live with NextChat) makes a perfectly good install look
+            # broken. Skip it; the web app runs without it.
+            if self._is_tauri_packaging_dir(subdir):
+                console.print(
+                    f"    [muted]{rel}: Tauri desktop packaging — not needed to run "
+                    f"the web app; skipping its native build.[/muted]"
+                )
+                continue
+
             # Node workspace members (pnpm/yarn/npm workspaces) are already
             # installed by the SINGLE root package-manager install. Re-installing
             # them one-by-one is redundant and, with npm, fails outright on the
@@ -545,6 +561,15 @@ class Engine:
                             f"    [warning]{rel}: a setup command failed (exit {outcome.returncode}). "
                             f"Run it manually if you need this component.[/warning]"
                         )
+
+    @staticmethod
+    def _is_tauri_packaging_dir(subdir: Path) -> bool:
+        """True for a Tauri desktop-packaging dir (conventionally ``src-tauri``).
+
+        It wraps the web app in a native shell — irrelevant for running the web
+        app itself, and building it needs the MSVC toolchain + WebView2 SDK.
+        """
+        return subdir.name == "src-tauri" or (subdir / "tauri.conf.json").exists()
 
     def _detect_subprojects(self):
         """Return [(subdir, detections)] for immediate subdirs that are projects."""
@@ -990,6 +1015,8 @@ class Engine:
 
         # Sub-project servers (e.g. a frontend/ that has an npm dev script).
         for subdir, results in self._detect_subprojects():
+            if self._is_tauri_packaging_dir(subdir):
+                continue  # desktop shell — `cargo run` needs MSVC and isn't the app
             sub = Engine(project_dir=subdir, config=self.config)
             sub.detections = results
             sub_cmd, sub_port = sub._resolve_launch()
@@ -1343,10 +1370,18 @@ class Engine:
             log_file = open(log_path, "w", encoding="utf-8", errors="replace")
             # Resolve npm/npx/etc. to a launchable path on Windows (see utils),
             # searching the launch env's PATH so the pinned Node's npm is used.
-            launch_cmd = _resolve_windows_executable(command, path=(env or {}).get("PATH"))
+            launch_cmd, env = self._resolve_launch_command(command, env)
             process = subprocess.Popen(
                 launch_cmd, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT, env=env
             )
+        except FileNotFoundError:
+            console.print(
+                f"  [error]Failed to launch{label}: [bold]{command[0]}[/bold] couldn't be "
+                f"found on this machine's PATH.[/error]\n"
+                f"  [muted]If it's installed, open a fresh terminal (or restart the DevReady "
+                f"app) so the updated PATH is picked up, then press Run again.[/muted]"
+            )
+            return None
         except (OSError, ValueError) as exc:
             console.print(f"  [error]Failed to launch{label}: {exc}[/error]")
             return None
@@ -1385,6 +1420,35 @@ class Engine:
             "announced_port": announced,   # what we expect it on, for messaging
             "cwd": cwd,
         }
+
+    def _resolve_launch_command(
+        self, command: List[str], env: Optional[dict]
+    ) -> Tuple[List[str], Optional[dict]]:
+        """Resolve a launch argv to something spawnable, healing a stale PATH.
+
+        Seen live (NextChat): the GUI server inherited a PATH from before the
+        Node toolchain existed, so ``npm run dev`` failed with WinError 2 even
+        though npm was installed — installs self-heal their PATH mid-run, but
+        the launcher never did. When the bare tool name doesn't resolve, merge
+        the registry PATH + well-known tool dirs (refresh_path) and try again;
+        the env's PATH is extended too so the tool's own children (npm → node)
+        resolve inside the launched process.
+        """
+        launch_cmd = _resolve_windows_executable(command, path=(env or {}).get("PATH"))
+        if (
+            sys.platform != "win32"
+            or launch_cmd[0] != command[0]      # already resolved to a real path
+            or Path(command[0]).exists()        # explicit path that exists — fine
+        ):
+            return launch_cmd, env
+
+        from .environment.system_deps import refresh_path
+
+        refresh_path()  # merges registry PATH + common tool dirs into os.environ
+        if env is not None:
+            env = {**env, "PATH": env.get("PATH", "") + os.pathsep + os.environ.get("PATH", "")}
+        search = (env or os.environ).get("PATH")
+        return _resolve_windows_executable(command, path=search), env
 
     # A first boot may legitimately grind for minutes (downloading ML models,
     # seeding a database) before binding its port. As long as the process is
