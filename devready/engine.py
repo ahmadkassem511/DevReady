@@ -211,7 +211,9 @@ class Engine:
         console.print(f"[muted]Project: {self.project_dir}[/muted]\n")
 
         state = self._read_state()
-        saved = self._state_processes(state)
+        # Live processes if any; else the commands the last launch used (kept
+        # across `devready stop`, which clears the live-process list).
+        saved = self._state_processes(state) or state.get("last_launch") or []
 
         # If anything's already running, don't start a duplicate.
         alive = [p for p in saved if p.get("pid") and _pid_alive(p["pid"])]
@@ -1097,6 +1099,45 @@ class Engine:
                 return ["node", entry, *rest]
         return None
 
+    @staticmethod
+    def _docker_container_name(command: List[str]) -> Optional[str]:
+        """The ``--name`` of a ``docker run`` launch command, or None.
+
+        For these launches the *container*, not the launcher process, is the
+        app — the launcher exits immediately, so stop/run/status must manage
+        the container by name.
+        """
+        if len(command) < 2:
+            return None
+        head = Path(command[0]).name.lower()
+        for suffix in (".exe", ".cmd", ".bat"):
+            if head.endswith(suffix):
+                head = head[: -len(suffix)]
+        if head != "docker" or command[1] != "run":
+            return None
+        for i, token in enumerate(command[2:], start=2):
+            if token == "--name" and i + 1 < len(command):
+                return command[i + 1]
+            if token.startswith("--name="):
+                return token.split("=", 1)[1] or None
+        return None
+
+    def _docker_container_exists(self, name: str, env: Optional[dict] = None) -> bool:
+        """True if a container with this exact name exists (running or stopped)."""
+        result = run_command(
+            ["docker", "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}"],
+            env=env,
+        )
+        return result.ok and name in result.stdout.split()
+
+    def _docker_container_running(self, name: str, env: Optional[dict] = None) -> bool:
+        """True if a container with this exact name is currently running."""
+        result = run_command(
+            ["docker", "ps", "--filter", f"name={name}", "--format", "{{.Names}}"],
+            env=env,
+        )
+        return result.ok and name in result.stdout.split()
+
     def _launch_targets(
         self, targets: List[dict], port_timeout: int = 25, expect_detached: bool = False
     ) -> List[str]:
@@ -1113,19 +1154,55 @@ class Engine:
         launch_env = self._launch_env()
 
         records: List[dict] = []
+        containers: List[str] = []
         for target in targets:
-            self._attempted_commands.add(" ".join(target["command"]))
+            spawn_command = target["command"]
+            spawn_timeout, spawn_detached = port_timeout, expect_detached
+
+            # `docker run --name X …`: the launcher exits immediately — the
+            # container is the app. Remember its name so stop/status can manage
+            # it, and if it already exists, relaunch it with `docker start`
+            # (re-running `docker run` would fail with "name already in use").
+            name = self._docker_container_name(spawn_command)
+            if name:
+                containers.append(name)
+                spawn_detached, spawn_timeout = True, max(port_timeout, 120)
+                if self._docker_container_exists(name, launch_env):
+                    console.print(
+                        f"  [muted]Container [bold]{name}[/bold] already exists — "
+                        f"starting it instead of creating a duplicate.[/muted]"
+                    )
+                    spawn_command = ["docker", "start", name]
+
+            self._attempted_commands.add(" ".join(spawn_command))
             record = self._spawn_and_check(
-                target, env=launch_env, port_timeout=port_timeout, expect_detached=expect_detached
+                {**target, "command": spawn_command},
+                env=launch_env, port_timeout=spawn_timeout, expect_detached=spawn_detached,
             )
             if record:
+                # Persist the ORIGINAL command: `docker run` recreates the
+                # container if it's ever deleted, and the exists-check above
+                # swaps in `docker start` whenever it's still around.
+                record["command"] = target["command"]
                 records.append(record)
 
         if not records:
             return []  # crash details already shown
 
         # Persist all running processes (preserve any docker flag already set).
-        self._write_state(processes=records, docker=self._read_state().get("docker", False))
+        # `last_launch` survives `devready stop` (which clears `processes`), so
+        # the next `devready run` relaunches the SAME documented commands
+        # instead of falling back to guessing.
+        state = self._read_state()
+        self._write_state(
+            processes=records,
+            docker=state.get("docker", False),
+            docker_containers=containers or state.get("docker_containers", []),
+            last_launch=[
+                {k: r.get(k) for k in ("name", "cwd", "command", "port")}
+                for r in records
+            ],
+        )
         return self._announce_running(records)
 
     def _pinned_node_bin_dir(self) -> Optional[str]:
@@ -2065,6 +2142,15 @@ class Engine:
         else:
             table.add_row("Server", "[muted]nothing set up yet[/muted]")
 
+        # Container-backed apps: the launcher pid is gone by design — the
+        # container's own state is the truth.
+        for name in state.get("docker_containers") or []:
+            if command_exists("docker") and self._docker_container_running(name):
+                any_running = True
+                table.add_row(f"container {name}", "[success]running[/success]")
+            else:
+                table.add_row(f"container {name}", "[muted]not running[/muted]")
+
         table.add_row("Docker services", "started" if state.get("docker") else "—")
         console.print(table)
 
@@ -2079,6 +2165,15 @@ class Engine:
         state = self._read_state()
         processes = self._state_processes(state)
 
+        # Containers this project launched — from the recorded field, plus any
+        # derivable from the saved launch commands (covers state files written
+        # before the field existed).
+        app_containers = list(state.get("docker_containers") or [])
+        for proc in processes + (state.get("last_launch") or []):
+            name = self._docker_container_name(proc.get("command") or [])
+            if name and name not in app_containers:
+                app_containers.append(name)
+
         stopped = 0
         for proc in processes:
             pid = proc.get("pid")
@@ -2088,7 +2183,7 @@ class Engine:
                 stopped += 1
         if stopped:
             console.print(f"  [success]Stopped {stopped} process(es).[/success]")
-        else:
+        elif not app_containers:
             console.print("  [muted]No running processes recorded.[/muted]")
 
         # Build an env where `docker` resolves even if the engine is Podman (its
@@ -2102,6 +2197,14 @@ class Engine:
             console.print("  Stopping Docker services…")
             base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
             run_command(base + ["down"], cwd=str(self.project_dir), capture=False, env=svc_env)
+
+        # App containers launched via a documented `docker run --name …` — the
+        # launcher pid is long gone, so stop them by name. The container itself
+        # is kept, so the next `devready run` restarts it instantly.
+        if app_containers and command_exists("docker"):
+            for name in app_containers:
+                console.print(f"  Stopping container [bold]{name}[/bold]…")
+                run_command(["docker", "stop", name], env=svc_env)
 
         # Stop any database/cache containers DevReady provisioned for this project.
         svc_containers = state.get("service_containers") or []

@@ -319,6 +319,65 @@ def test_resolve_server_command_unresolvable(tmp_path, monkeypatch):
     assert eng._resolve_server_command("openclaw gateway run") is None
 
 
+def test_docker_container_name_extraction(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    assert eng._docker_container_name(
+        ["docker", "run", "-d", "-p", "8088:80", "--name", "welcome", "img"]
+    ) == "welcome"
+    assert eng._docker_container_name(
+        ["docker", "run", "-d", "--name=welcome", "img"]
+    ) == "welcome"
+    assert eng._docker_container_name(["docker", "compose", "up", "-d"]) is None
+    assert eng._docker_container_name(["npm", "run", "dev"]) is None
+    assert eng._docker_container_name(["docker", "run", "img"]) is None  # unnamed
+
+
+def test_stop_stops_recorded_app_container(tmp_path, monkeypatch):
+    # A guided `docker run --name X` launch: the launcher pid dies instantly,
+    # so stop must stop the CONTAINER by name — previously it said "No running
+    # processes recorded" and left the app running.
+    import devready.engine as engine_mod
+    from devready.utils import CommandResult
+
+    eng = Engine(project_dir=tmp_path)
+    eng._write_state(docker_containers=["welcome-to-docker"], processes=[])
+    ran = []
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: n == "docker")
+    monkeypatch.setattr(
+        engine_mod, "run_command",
+        lambda cmd, **k: ran.append(list(cmd)) or CommandResult("x", 0),
+    )
+    eng.stop()
+    assert ["docker", "stop", "welcome-to-docker"] in ran
+
+
+def test_relaunch_existing_container_uses_docker_start(tmp_path, monkeypatch):
+    # Re-running the saved `docker run --name X` would fail with "name already
+    # in use" — an existing container must be relaunched with `docker start`.
+    eng = Engine(project_dir=tmp_path)
+    spawned = []
+
+    def fake_spawn(target, **kwargs):
+        spawned.append(list(target["command"]))
+        return {"name": target["name"], "pid": 123, "command": target["command"],
+                "port": 8088, "cwd": target["cwd"]}
+
+    monkeypatch.setattr(eng, "_spawn_and_check", fake_spawn)
+    monkeypatch.setattr(eng, "_docker_container_exists", lambda name, env=None: True)
+    monkeypatch.setattr(eng, "_announce_running", lambda records: ["http://localhost:8088"])
+
+    original = ["docker", "run", "-d", "-p", "8088:80", "--name", "welcome", "img"]
+    eng._launch_targets([{"name": "root", "cwd": str(tmp_path), "command": original, "port": 8088}])
+
+    assert spawned == [["docker", "start", "welcome"]]
+    state = eng._read_state()
+    assert state["docker_containers"] == ["welcome"]
+    # The ORIGINAL run command stays persisted so a deleted container can be
+    # recreated, and `last_launch` survives `devready stop` for relaunching.
+    assert state["processes"][0]["command"] == original
+    assert state["last_launch"][0]["command"] == original
+
+
 def test_subprojects_skipped_after_published_install(tmp_path, monkeypatch):
     # Once the official published package is installed, the source tree's
     # components (e.g. Open WebUI's backend/) are the code the wheel already
