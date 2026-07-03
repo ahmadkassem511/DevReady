@@ -351,6 +351,35 @@ def test_stop_stops_recorded_app_container(tmp_path, monkeypatch):
     assert ["docker", "stop", "welcome-to-docker"] in ran
 
 
+def test_status_finds_container_via_podman_shim(tmp_path, monkeypatch):
+    # On a no-admin machine `docker` isn't a real binary — only the Podman shim
+    # at ~/.devready/bin/docker(.cmd) provides it, and that dir isn't on a fresh
+    # `devready status` process's PATH unless we add it (same as stop() does).
+    import devready.engine as engine_mod
+
+    eng = Engine(project_dir=tmp_path)
+    eng._write_state(docker_containers=["welcome-to-docker"], processes=[])
+
+    fake_home = tmp_path / "home"
+    shim_dir = fake_home / ".devready" / "bin"
+    shim_dir.mkdir(parents=True)
+    (shim_dir / "docker").write_text("#!/bin/sh\nexec podman \"$@\"\n")
+
+    monkeypatch.setattr(engine_mod.Path, "home", lambda: fake_home)
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: False)  # no real docker
+    checked = []
+    monkeypatch.setattr(
+        eng, "_docker_container_running",
+        lambda name, env=None: checked.append(name) or True,
+    )
+
+    eng.status()
+    # Without the shim-dir fallback, has_docker would be False and the running
+    # check never reached — checked would stay empty and the row would
+    # (wrongly) say "not running" even though Podman has it up.
+    assert checked == ["welcome-to-docker"]
+
+
 def test_relaunch_existing_container_uses_docker_start(tmp_path, monkeypatch):
     # Re-running the saved `docker run --name X` would fail with "name already
     # in use" — an existing container must be relaunched with `docker start`.

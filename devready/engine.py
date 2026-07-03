@@ -2143,13 +2143,22 @@ class Engine:
             table.add_row("Server", "[muted]nothing set up yet[/muted]")
 
         # Container-backed apps: the launcher pid is gone by design — the
-        # container's own state is the truth.
-        for name in state.get("docker_containers") or []:
-            if command_exists("docker") and self._docker_container_running(name):
-                any_running = True
-                table.add_row(f"container {name}", "[success]running[/success]")
-            else:
-                table.add_row(f"container {name}", "[muted]not running[/muted]")
+        # container's own state is the truth. `docker` may only exist via the
+        # Podman shim (~/.devready/bin), which isn't on this fresh process's
+        # PATH unless we add it — same as stop()'s svc_env.
+        docker_containers = state.get("docker_containers") or []
+        if docker_containers:
+            svc_env = os.environ.copy()
+            shim_dir = Path.home() / ".devready" / "bin"
+            if shim_dir.exists():
+                svc_env["PATH"] = str(shim_dir) + os.pathsep + svc_env.get("PATH", "")
+            has_docker = command_exists("docker") or (shim_dir / "docker").exists() or (shim_dir / "docker.cmd").exists()
+            for name in docker_containers:
+                if has_docker and self._docker_container_running(name, svc_env):
+                    any_running = True
+                    table.add_row(f"container {name}", "[success]running[/success]")
+                else:
+                    table.add_row(f"container {name}", "[muted]not running[/muted]")
 
         table.add_row("Docker services", "started" if state.get("docker") else "—")
         console.print(table)
