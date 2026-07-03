@@ -277,7 +277,12 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
                     detail="Refusing to delete files outside the DevReady workspace.",
                 )
             try:
-                Engine(project_dir=target).stop()  # stop anything running first
+                engine = Engine(project_dir=target)
+                engine.stop()  # stop anything running first
+                # "Delete" must actually free the space: also remove the
+                # containers, volumes, and images this project created — a
+                # single app image can be 1-2 GB that otherwise stays behind.
+                engine.purge_docker_artifacts()
             except Exception:
                 pass
             # Robust delete: clears read-only .git pack files and retries transient
@@ -295,6 +300,27 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
 
         unregister_project(target)
         return {"ok": True}
+
+    @app.post("/api/cleanup")
+    async def cleanup_disk(request: Request):
+        """Free disk space by purging shared tool caches (pip/npm/uv/Docker).
+
+        Safe by design: these are pure caches — installed projects keep
+        working; the only cost is a re-download on the next install.
+        """
+        import asyncio
+
+        from ..environment import cleanup as cleanup_mod
+
+        body = await request.json()
+        deep = bool(body.get("deep"))
+        # Heavy + blocking (docker prune can take a while) — run off the loop.
+        report = await asyncio.to_thread(cleanup_mod.cleanup_caches, deep)
+        return {
+            "freed_bytes": report["freed_bytes"],
+            "freed_human": cleanup_mod.format_bytes(report["freed_bytes"]),
+            "details": [{"label": label, "ok": ok} for label, ok in report["details"]],
+        }
 
     # -- API: compatibility check (before install) -------------------------
     @app.post("/api/check-compatibility")

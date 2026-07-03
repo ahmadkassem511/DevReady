@@ -1145,6 +1145,37 @@ class Engine:
                 return token.split("=", 1)[1] or None
         return None
 
+    # docker-run flags that take NO value — everything else starting with "-"
+    # (without "=") consumes the next token. Used to find the image argument.
+    _DOCKER_RUN_BOOL_FLAGS = {
+        "-d", "--detach", "--rm", "-i", "--interactive", "-t", "--tty", "-it",
+        "-ti", "-P", "--publish-all", "--privileged", "--init", "--read-only",
+        "--no-healthcheck", "--sig-proxy", "-q", "--quiet",
+    }
+
+    @classmethod
+    def _docker_run_image(cls, command: List[str]) -> Optional[str]:
+        """The image a ``docker run`` command uses, or None (best-effort parse)."""
+        if len(command) < 2:
+            return None
+        head = Path(command[0]).name.lower()
+        for suffix in (".exe", ".cmd", ".bat"):
+            if head.endswith(suffix):
+                head = head[: -len(suffix)]
+        if head != "docker" or command[1] != "run":
+            return None
+        i = 2
+        while i < len(command):
+            token = command[i]
+            if token.startswith("-"):
+                if "=" in token or token in cls._DOCKER_RUN_BOOL_FLAGS:
+                    i += 1
+                else:
+                    i += 2  # value-taking flag: skip its argument too
+                continue
+            return token  # first positional after the flags = the image
+        return None
+
     def _docker_container_exists(self, name: str, env: Optional[dict] = None) -> bool:
         """True if a container with this exact name exists (running or stopped)."""
         result = run_command(
@@ -2252,6 +2283,58 @@ class Engine:
 
         # Clear the runtime fields but keep the state file around.
         self._write_state(processes=[], pid=None, docker=False, service_containers=[])
+
+    def purge_docker_artifacts(self) -> None:
+        """Remove the containers, volumes, and images THIS project created.
+
+        Deleting a project's folder doesn't free its Docker footprint — a neko
+        or Open WebUI image is 1–2 GB that survives on disk invisibly. Called
+        when the user deletes a project, so "delete" really means delete.
+        Everything is best-effort: a missing engine or already-gone artifact is
+        fine.
+        """
+        state = self._read_state()
+
+        svc_env = os.environ.copy()
+        shim_dir = Path.home() / ".devready" / "bin"
+        if shim_dir.exists():
+            svc_env["PATH"] = str(shim_dir) + os.pathsep + svc_env.get("PATH", "")
+        has_docker = (
+            command_exists("docker")
+            or (shim_dir / "docker").exists()
+            or (shim_dir / "docker.cmd").exists()
+        )
+        if not has_docker:
+            return
+
+        # Compose stack: containers + named volumes + locally built images.
+        if self._find_compose_file() is not None:
+            console.print("  Removing this project's Docker services (compose down -v)…")
+            base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
+            run_command(
+                base + ["down", "--volumes", "--rmi", "local"],
+                cwd=str(self.project_dir), env=svc_env,
+            )
+
+        # App containers (docker run --name …) and the images they were run from.
+        names = set(state.get("docker_containers") or [])
+        images = set()
+        for proc in (state.get("processes") or []) + (state.get("last_launch") or []):
+            cmd = proc.get("command") or []
+            name = self._docker_container_name(cmd)
+            if name:
+                names.add(name)
+            image = self._docker_run_image(cmd)
+            if image:
+                images.add(image)
+        for name in names:
+            console.print(f"  Removing container [bold]{name}[/bold]…")
+            run_command(["docker", "rm", "-f", name], env=svc_env)
+        for container in state.get("service_containers") or []:
+            run_command(["docker", "rm", "-f", container], env=svc_env)
+        for image in images:
+            console.print(f"  Removing image [bold]{image}[/bold] (frees its disk space)…")
+            run_command(["docker", "rmi", image], env=svc_env)
 
     # =========================================================================
     # Public command: clean

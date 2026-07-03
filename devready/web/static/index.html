@@ -200,6 +200,19 @@
       </div>
 
       <div class="card" style="max-width:640px; margin-top:18px;">
+        <h3>Free up disk space</h3>
+        <p class="muted">Installing projects fills shared caches outside the projects themselves — pip wheels, npm packages, Docker images and build cache. Deleting a project doesn't shrink those. This clears them safely: nothing installed breaks, the next install just re-downloads what it needs.</p>
+        <label class="muted" style="display:block; margin: 6px 0 10px; font-size:13px;">
+          <input type="checkbox" id="deep-clean" style="vertical-align:-2px;" />
+          Deep clean — also remove <b>all</b> unused Docker images &amp; volumes (biggest savings; next run re-downloads)
+        </label>
+        <div class="row">
+          <button class="btn" id="cleanup-btn" onclick="cleanupSpace()">Free up space</button>
+          <span id="cleanup-status" class="muted"></span>
+        </div>
+      </div>
+
+      <div class="card" style="max-width:640px; margin-top:18px;">
         <h3>Advanced: install from a GitHub URL</h3>
         <div class="warn">⚠️ Only do this for repositories you trust. Installing runs the project's own setup on your computer. Vetted apps in <b>Discover</b> are the safe choice.</div>
         <input id="custom-url" type="text" placeholder="https://github.com/owner/repo" />
@@ -630,7 +643,7 @@
     async function removeProject(btn, encPath, name, deleteFiles) {
       const path = decodeURIComponent(encPath);
       const msg = deleteFiles
-        ? `Permanently delete this project and its folder?\n\n${path}\n\nThis cannot be undone.`
+        ? `Permanently delete this project?\n\n${path}\n\nThis removes its folder (including hidden files and packages) AND the Docker containers/images it created, so the disk space really comes back.\n\nThis cannot be undone.`
         : `Remove this project from My Projects?\n\nIts files stay on disk — you're just removing it from the list.`;
       if (!confirm(msg)) return;
 
@@ -654,6 +667,25 @@
         showToast("✗ " + (deleteFiles ? "Couldn't delete " : "Couldn't remove ") + name + ": " + e, "err");
       }
       loadLibrary();
+    }
+
+    async function cleanupSpace() {
+      const btn = document.getElementById("cleanup-btn");
+      const status = document.getElementById("cleanup-status");
+      const deep = document.getElementById("deep-clean").checked;
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner"></span>Cleaning…`;
+      status.textContent = "This can take a minute (clearing caches" + (deep ? " and Docker images" : "") + ")…";
+      try {
+        const r = await api("/api/cleanup", { method: "POST", body: JSON.stringify({ deep }) });
+        status.textContent = "";
+        showToast(`✓ Freed about ${r.freed_human} of disk space.`, "ok");
+      } catch (e) {
+        status.textContent = "";
+        showToast("✗ Cleanup failed: " + e, "err");
+      }
+      btn.disabled = false;
+      btn.textContent = "Free up space";
     }
 
     // --- settings / key ---

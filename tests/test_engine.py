@@ -346,6 +346,48 @@ def test_run_blocks_docker_relaunch_without_engine(tmp_path, monkeypatch):
     eng.run()  # returns after the warning — no launch attempted
 
 
+def test_docker_run_image_extraction(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    # neko-style: value-taking flags before the image.
+    assert eng._docker_run_image(
+        ["docker", "run", "-d", "-p", "8080:8080", "-e", "NEKO_PASSWORD=neko",
+         "--shm-size", "2gb", "ghcr.io/m1k1o/neko/firefox:latest"]
+    ) == "ghcr.io/m1k1o/neko/firefox:latest"
+    assert eng._docker_run_image(
+        ["docker", "run", "-d", "-p", "8088:80", "--name", "welcome", "docker/welcome-to-docker"]
+    ) == "docker/welcome-to-docker"
+    assert eng._docker_run_image(["docker", "run", "--rm", "img", "echo", "hi"]) == "img"
+    assert eng._docker_run_image(["docker", "compose", "up"]) is None
+    assert eng._docker_run_image(["npm", "run", "dev"]) is None
+
+
+def test_purge_docker_artifacts_removes_containers_and_images(tmp_path, monkeypatch):
+    # Deleting a project must free its Docker footprint: rm -f its containers
+    # and rmi the image its saved launch command pulled.
+    import devready.engine as engine_mod
+    from devready.utils import CommandResult
+
+    eng = Engine(project_dir=tmp_path)
+    eng._write_state(
+        docker_containers=["welcome-to-docker"],
+        last_launch=[{
+            "name": "root", "cwd": str(tmp_path),
+            "command": ["docker", "run", "-d", "-p", "8088:80", "--name",
+                        "welcome-to-docker", "docker/welcome-to-docker"],
+            "port": 8088,
+        }],
+    )
+    ran = []
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: n == "docker")
+    monkeypatch.setattr(
+        engine_mod, "run_command",
+        lambda cmd, **k: ran.append(list(cmd)) or CommandResult("x", 0),
+    )
+    eng.purge_docker_artifacts()
+    assert ["docker", "rm", "-f", "welcome-to-docker"] in ran
+    assert ["docker", "rmi", "docker/welcome-to-docker"] in ran
+
+
 def test_docker_container_name_extraction(tmp_path):
     eng = Engine(project_dir=tmp_path)
     assert eng._docker_container_name(

@@ -135,6 +135,38 @@ def clean(
 
 
 @app.command()
+def cleanup(
+    deep: bool = typer.Option(
+        False, "--deep",
+        help="Also remove ALL unused Docker images and volumes (bigger wins; "
+             "the next container run re-downloads its image).",
+    ),
+) -> None:
+    """Free disk space: purge the tool caches DevReady's installs fill up.
+
+    Installing projects grows SHARED caches outside the projects themselves —
+    pip keeps every downloaded wheel, npm/yarn/pnpm keep package tarballs, uv
+    keeps interpreters, and Docker keeps images and build cache. Deleting a
+    project never shrinks those. This clears them safely: they're pure caches,
+    so the only cost is a re-download on the next install.
+    """
+    from .environment import cleanup as cleanup_mod
+
+    console.print("Freeing disk space (safe: only caches — installed projects are untouched)…")
+    report = cleanup_mod.cleanup_caches(deep=deep)
+    for label, ok in report["details"]:
+        mark = "[success]✓[/success]" if ok else "[muted]–[/muted]"
+        console.print(f"  {mark} {label}")
+    freed = cleanup_mod.format_bytes(report["freed_bytes"])
+    console.print(f"\n[success]Freed about {freed} of disk space.[/success]")
+    console.print(
+        "[muted]Note: space cleared inside Docker Desktop's virtual disk may show up "
+        "on Windows only after Docker Desktop compacts it (Settings → Resources → "
+        "Disk, or restart Docker Desktop).[/muted]"
+    )
+
+
+@app.command()
 def doctor(
     path: Path = typer.Argument(
         Path("."),

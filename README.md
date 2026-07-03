@@ -231,7 +231,12 @@ where you can:
 - When it's ready, click **Open app** to launch it (e.g. `http://localhost:8501`).
 - **My Projects** is your control panel for everything you've installed: **Run**
   a project, **Open** it in the browser, **Stop** it, **Remove** it from the list,
-  or **Delete** its files — all without touching a terminal.
+  or **Delete** it — which really deletes: the whole folder (hidden files and
+  packages included) *and* the Docker containers, volumes, and images the
+  project created, so the disk space actually comes back.
+- **Settings → Free up disk space** reclaims the shared caches installs fill up
+  (pip wheels, npm packages, Docker's unused data) with one click and tells you
+  how much it freed.
 
 ### Adding the free AI key (optional, in the browser)
 
@@ -297,6 +302,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 | `devready status [path]` | Show run state and URL(s) for each component — including the real state of app **containers** (works on the Podman fallback too). |
 | `devready stop [path]` | Stop the launched server, any started services, and any app **containers** DevReady launched. |
 | `devready clean [path]` | Remove DevReady-managed artifacts (`.venv`, state). |
+| `devready cleanup [--deep]` | **Free disk space.** Purges the shared caches installs fill up (pip wheels, npm/yarn/pnpm, uv, Docker's unused data) and reports how much came back — safe, nothing installed breaks. `--deep` also removes all unused Docker images & volumes. |
 | `devready doctor [path]` | Diagnose your toolchain and configuration — and, inside a project, show its **requirement plan**: what it needs vs. what's installed, and what DevReady will set up, *before* you run `start`. |
 | `devready config show` | Print the current configuration (key masked). |
 | `devready config set llm openrouter [--model M] [--api-key K]` | Configure the LLM. |
