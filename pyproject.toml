@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devready"
-version = "0.31.0"
+version = "0.32.0"
 description = "Set up any cloned project with a single command: devready start"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -84,7 +84,7 @@ exclude = ["tests*"]
 [tool.setuptools.package-data]
 # Ship the web GUI's data files (catalog + static assets) inside the wheel —
 # without this, setuptools would package only the .py files.
-"devready.web" = ["catalog.json", "static/*"]
+"devready.web" = ["catalog.json", "catalog_verified.json", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

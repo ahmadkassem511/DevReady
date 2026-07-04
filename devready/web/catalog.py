@@ -16,16 +16,54 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 _CATALOG_FILE = Path(__file__).with_name("catalog.json")
+_VERIFIED_FILE = Path(__file__).with_name("catalog_verified.json")
 
 
 @lru_cache(maxsize=1)
 def _load() -> Dict:
     """Load and cache the catalog JSON (read once per process)."""
     data = json.loads(_CATALOG_FILE.read_text(encoding="utf-8"))
+    verified = _load_verified()
+    projects = [
+        {**p, "verified": verified.get(p.get("id", ""), {})}
+        for p in data.get("projects", [])
+    ]
     return {
         "categories": data.get("categories", []),
-        "projects": data.get("projects", []),
+        "projects": projects,
     }
+
+
+def _load_verified() -> Dict:
+    """Per-app, per-OS install verification results from the nightly dogfood CI.
+
+    Shape: ``{app_id: {os_key: {"ok": bool, "checked_at": "YYYY-MM-DD"}}}``.
+    Missing file (fresh checkout, or CI hasn't run yet) means no badges.
+    """
+    try:
+        return json.loads(_VERIFIED_FILE.read_text(encoding="utf-8")).get("apps", {})
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def merge_verified_results(existing: Dict, run_payload: Dict) -> Dict:
+    """Fold one OS's nightly run into the accumulated verification file.
+
+    ``run_payload`` is what scripts/verify_catalog.py writes:
+    ``{"os": "windows", "checked_at": "…", "results": {app_id: {"ok": …}}}``.
+    Other OSes' entries are preserved; this OS's entries are replaced.
+    """
+    apps = dict(existing.get("apps", {}))
+    os_key = run_payload.get("os", "unknown")
+    for app_id, result in (run_payload.get("results") or {}).items():
+        entry = dict(apps.get(app_id, {}))
+        entry[os_key] = {
+            "ok": bool(result.get("ok")),
+            "checked_at": run_payload.get("checked_at", ""),
+            "seconds": result.get("seconds"),
+        }
+        apps[app_id] = entry
+    return {"apps": apps}
 
 
 def categories() -> List[Dict]:

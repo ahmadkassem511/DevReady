@@ -1,0 +1,81 @@
+# Nightly dogfooding: install every flagged catalog app with DevReady itself
+# on real Windows/macOS/Linux runners, then commit the per-OS results that
+# power the "✓ Verified installs on <OS>" badges in the GUI.
+#
+# A failing APP here is information (the badge shows ✗), not a red build —
+# the jobs only fail on infrastructure errors. Every genuine ✗ is a
+# regression signal worth reading the log for.
+name: Verify catalog
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # nightly, 03:00 UTC
+  workflow_dispatch: {}    # allow manual runs from the Actions tab
+
+permissions:
+  contents: write          # the publish job commits catalog_verified.json
+
+jobs:
+  verify:
+    name: Verify on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install DevReady
+        run: pip install -e .
+
+      - name: Verify catalog apps
+        env:
+          VERIFY_APP_TIMEOUT: "1800"
+        run: python scripts/verify_catalog.py verify-${{ runner.os }}.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verify-${{ runner.os }}
+          path: verify-*.json
+
+  publish:
+    name: Publish badges
+    needs: verify
+    if: always()             # publish whatever completed, even if one OS failed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: runs
+          merge-multiple: true
+
+      - name: Merge results
+        run: |
+          pip install -e . --quiet
+          files=$(ls runs/verify-*.json 2>/dev/null || true)
+          if [ -z "$files" ]; then echo "no results to merge"; exit 0; fi
+          python scripts/merge_verify_results.py $files
+
+      - name: Commit verification results
+        run: |
+          git config user.name "devready-verify-bot"
+          git config user.email "actions@github.com"
+          git add devready/web/catalog_verified.json
+          if git diff --cached --quiet; then echo "no changes"; exit 0; fi
+          git commit -m "catalog: nightly install verification results [skip ci]"
+          git pull --rebase origin main
+          git push origin main

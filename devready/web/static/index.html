@@ -305,13 +305,32 @@
       return "" + n;
     }
 
+    // "✓ Verified installs on <OS>" chips from the nightly dogfood CI — every
+    // catalog app is really installed by DevReady on real Windows/Linux/macOS
+    // runners, and these badges show the latest verdicts.
+    const _OS_LABELS = { windows: "Windows", linux: "Linux", macos: "macOS" };
+    function verifiedBadges(p) {
+      const v = p.verified || {};
+      const parts = Object.keys(_OS_LABELS)
+        .filter(k => v[k])
+        .map(k => {
+          const ok = v[k].ok;
+          const color = ok ? "var(--green)" : "var(--muted)";
+          const mark = ok ? "✓" : "✗";
+          const title = `${ok ? "Install verified" : "Install failed"} on ${_OS_LABELS[k]} (checked ${esc(v[k].checked_at || "")})`;
+          return `<span title="${title}" style="color:${color};font-size:11px;margin-right:8px">${mark} ${_OS_LABELS[k]}</span>`;
+        });
+      if (!parts.length) return "";
+      return `<div style="margin-top:6px" title="Installed nightly by DevReady itself on real machines">${parts.join("")}</div>`;
+    }
+
     function projectCard(p) {
       const stars = (typeof p.stars === "number") ? `<span class="stars">★ ${fmtStars(p.stars)}</span>` : "";
       return `
         <div class="card">
           <div class="card-head"><h3>${esc(p.name)}</h3>${stars}</div>
           <span class="lang">${esc(p.language || "")}</span>
-          <p>${esc(p.description || "No description provided.")}</p>
+          <p>${esc(p.description || "No description provided.")}</p>${verifiedBadges(p)}
           <div class="actions">
             <button class="btn" onclick='openDetail(${JSON.stringify(p).replace(/'/g, "&#39;")})'>View &amp; install</button>
           </div>

@@ -226,6 +226,11 @@ where you can:
   hand-picked **Featured** set, then explore the most popular projects on GitHub
   — each shows its star count and a short description (tap **✨ Explain simply**
   for a plain-language version when you've added a free AI key).
+- **Verified installs.** Every night, a CI pipeline uses DevReady itself to
+  install each Featured app on real **Windows, Linux, and macOS** machines and
+  records the result — catalog cards show live **"✓ Windows ✓ Linux"** badges,
+  so you know an app installs on *your* OS before you click. (The same runs
+  double as a regression net: a badge flipping to ✗ means something broke.)
 - Click a project, read what it does, and press **Install** — DevReady clones
   it, sets everything up, and shows a **live progress log** right in the page.
 - When it's ready, click **Open app** to launch it (e.g. `http://localhost:8501`).

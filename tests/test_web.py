@@ -363,3 +363,44 @@ def test_set_project_env_endpoint(client, tmp_path):
         json={"path": str(proj), "values": {}},
         headers=headers,
     ).status_code == 400
+
+
+def test_merge_verified_results_preserves_other_oses():
+    # A runner outage on macOS must not erase last night's macOS verdicts when
+    # the Linux run merges.
+    existing = {"apps": {"fastapi": {"macos": {"ok": True, "checked_at": "2026-07-01"}}}}
+    linux_run = {
+        "os": "linux", "checked_at": "2026-07-04",
+        "results": {"fastapi": {"ok": True, "seconds": 60},
+                    "streamlit": {"ok": False, "seconds": 300}},
+    }
+    merged = catalog.merge_verified_results(existing, linux_run)
+    assert merged["apps"]["fastapi"]["macos"]["ok"] is True         # preserved
+    assert merged["apps"]["fastapi"]["linux"]["ok"] is True         # added
+    assert merged["apps"]["fastapi"]["linux"]["checked_at"] == "2026-07-04"
+    assert merged["apps"]["streamlit"]["linux"]["ok"] is False      # honest ✗
+
+
+def test_catalog_projects_carry_verified_data(tmp_path, monkeypatch):
+    # The GUI's badges come from catalog_verified.json attached per project.
+    import json as _json
+
+    monkeypatch.setattr(catalog, "_CATALOG_FILE", tmp_path / "catalog.json")
+    monkeypatch.setattr(catalog, "_VERIFIED_FILE", tmp_path / "catalog_verified.json")
+    (tmp_path / "catalog.json").write_text(_json.dumps({
+        "categories": [], "projects": [{"id": "fastapi", "name": "FastAPI"}],
+    }))
+    (tmp_path / "catalog_verified.json").write_text(_json.dumps({
+        "apps": {"fastapi": {"windows": {"ok": True, "checked_at": "2026-07-04"}}},
+    }))
+    catalog._load.cache_clear()
+    try:
+        projects = catalog.all_projects()
+        assert projects[0]["verified"]["windows"]["ok"] is True
+    finally:
+        catalog._load.cache_clear()  # don't leak the stub into other tests
+
+
+def test_catalog_verified_missing_file_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, "_VERIFIED_FILE", tmp_path / "nope.json")
+    assert catalog._load_verified() == {}

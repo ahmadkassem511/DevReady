@@ -1,0 +1,11 @@
+{
+  "apps": {
+    "fastapi": {
+      "windows": {
+        "ok": true,
+        "checked_at": "2026-07-04",
+        "seconds": 88
+      }
+    }
+  }
+}
