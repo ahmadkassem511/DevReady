@@ -80,7 +80,10 @@ def _run_check(repo_url: str):
             readme_text, config, engine.detections,
             llm_timeout=20, llm_max_attempts=2,
         )
-        report = system_check.check_compatibility(hw, req)
+        # Disk pre-flight: estimate the footprint so the GUI's pre-install
+        # check flags a too-full disk BEFORE the user commits to installing.
+        est_gb, _ = system_check.estimate_install_footprint(target, engine.detections)
+        report = system_check.check_compatibility(hw, req, estimated_install_gb=est_gb)
         return report
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -131,12 +134,19 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
     @app.get("/api/state")
     def get_state():
         """What the GUI needs on load: AI-key status + Discover categories."""
+        import shutil as _shutil
+
         config = Config.load()
+        try:
+            free_gb = round(_shutil.disk_usage(Path.home()).free / (1024 ** 3), 1)
+        except OSError:
+            free_gb = None
         return {
             "ai_configured": config.llm.is_configured,
             "model": config.llm.model,
             "github_configured": bool(config.github_token),
             "categories": github.DISCOVER_CATEGORIES,
+            "free_disk_gb": free_gb,  # drives the low-disk banner
         }
 
     @app.get("/api/catalog")

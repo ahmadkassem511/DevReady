@@ -349,7 +349,17 @@ class Engine:
             readme_text, self.config, self.detections,
             llm_timeout=30, llm_max_attempts=3,
         )
-        report = system_check.check_compatibility(hw, req)
+        # Disk pre-flight: estimate this install's footprint so a 5 GB install
+        # on a nearly-full disk fails NOW with advice, not at minute 25.
+        est_gb, est_reasons = system_check.estimate_install_footprint(
+            self.project_dir, self.detections
+        )
+        if est_reasons:
+            console.print(
+                f"  Estimated install size: [bold]~{est_gb:.0f} GB[/bold] "
+                f"[muted]({'; '.join(est_reasons)}) — rough estimate[/muted]"
+            )
+        report = system_check.check_compatibility(hw, req, estimated_install_gb=est_gb)
         system_check.print_report(report)
         if not report.compatible:
             # Use a SEPARATE flag — never poison _install_ok, or a hardware

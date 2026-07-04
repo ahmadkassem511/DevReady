@@ -661,18 +661,121 @@ def _as_float(val) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# Install footprint estimation (disk pre-flight)
+# ---------------------------------------------------------------------------
+
+# Rough per-stack install footprints in GB (dependencies + tool caches).
+# Deliberately coarse — the goal is to fail a 5 GB install on a 1 GB disk at
+# minute one, not to be exact.
+_STACK_FOOTPRINT_GB = {
+    "Node.js": 1.2,   # node_modules + npm cache
+    "Python": 0.8,    # .venv + pip cache
+    "Rust": 1.5,      # target/ + crate sources
+    "Go": 0.4,
+    "Java": 0.8,
+    ".NET": 0.8,
+    "Ruby": 0.3,
+    "PHP": 0.3,
+}
+
+# Python packages that pull the multi-GB ML stack (torch wheels alone are GBs).
+_HEAVY_ML_RE = re.compile(
+    r"\b(torch|tensorflow|transformers|sentence-transformers|chromadb|"
+    r"onnxruntime|accelerate|faster-whisper|diffusers|vllm)\b",
+    re.IGNORECASE,
+)
+
+
+def estimate_install_footprint(project_dir: Path, detections) -> "tuple[float, List[str]]":
+    """Rough disk footprint (GB) an install will need, with human reasons.
+
+    Sums per-stack baselines, adds a big boost when Python deps include the
+    ML stack (PyTorch etc. — the single largest real-world consumer), and
+    accounts for Docker images when the project ships container files.
+    """
+    total = 0.0
+    reasons: List[str] = []
+    languages = {d.language for d in (detections or [])}
+    for language in sorted(languages):
+        gb = _STACK_FOOTPRINT_GB.get(language)
+        if gb:
+            total += gb
+            reasons.append(f"{language} dependencies (~{gb:g} GB)")
+
+    if "Python" in languages:
+        dep_text = ""
+        for name in ("requirements.txt", "pyproject.toml", "backend/requirements.txt"):
+            f = project_dir / name
+            if f.exists():
+                try:
+                    dep_text += f.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
+        if _HEAVY_ML_RE.search(dep_text):
+            total += 4.0
+            reasons.append("AI/ML libraries — PyTorch stack (~4 GB)")
+
+    has_container_files = any(
+        (project_dir / name).exists()
+        for name in ("docker-compose.yml", "docker-compose.yaml",
+                     "compose.yml", "compose.yaml", "Dockerfile")
+    )
+    if has_container_files:
+        total += 2.0
+        reasons.append("Docker images (~2 GB)")
+
+    return max(total, 0.5), reasons
+
+
+# ---------------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------------
 
-def check_compatibility(hw: HardwareInfo, req: SystemRequirements) -> CompatibilityReport:
+def check_compatibility(
+    hw: HardwareInfo,
+    req: SystemRequirements,
+    estimated_install_gb: Optional[float] = None,
+) -> CompatibilityReport:
     """Compare hardware against requirements and produce a compatibility report.
 
     Critical errors (status="error") block installation — these are things like
     wrong OS architecture or a missing required GPU. Warnings let the user
-    continue but are displayed prominently.
+    continue but are displayed prominently. ``estimated_install_gb`` (from
+    :func:`estimate_install_footprint`) adds a disk pre-flight check so a 5 GB
+    install fails at minute one on a full disk, not at minute 25 mid-download.
     """
     checks: List[CheckResult] = []
     compatible = True
+
+    # Disk pre-flight (estimate-based; separate from a README-declared minimum).
+    if estimated_install_gb is not None:
+        need = estimated_install_gb + 1.0  # keep a safety buffer for the OS
+        free = hw.disk_free_gb
+        cleanup_hint = (
+            "Free space first: run `devready cleanup` (or the GUI's "
+            "'Free up space' button), empty the recycle bin, or delete old projects."
+        )
+        if free < max(1.5, estimated_install_gb * 0.5):
+            compatible = False
+            checks.append(CheckResult(
+                "Disk space for install", "error",
+                f"{free:.1f} GB free", f"~{need:.0f} GB",
+                f"This install needs roughly {need:.0f} GB but only {free:.1f} GB is free — "
+                f"it would fail partway through. {cleanup_hint}",
+            ))
+        elif free < need:
+            checks.append(CheckResult(
+                "Disk space for install", "warning",
+                f"{free:.1f} GB free", f"~{need:.0f} GB",
+                f"Space is tight ({free:.1f} GB free vs ~{need:.0f} GB estimated) — "
+                f"the install may run out of room. {cleanup_hint}",
+            ))
+        else:
+            checks.append(CheckResult(
+                "Disk space for install", "ok",
+                f"{free:.1f} GB free", f"~{need:.0f} GB",
+                "Enough free disk for this install.",
+            ))
 
     # OS architecture (critical)
     if req.cpu_arch:

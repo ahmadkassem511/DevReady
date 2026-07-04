@@ -280,6 +280,7 @@
       CATEGORIES = state.categories;               // "featured" first, then GitHub topics
       activeCat = CATEGORIES.length ? CATEGORIES[0].id : "featured";
       document.getElementById("ai-banner").classList.toggle("hidden", state.ai_configured);
+      renderDiskBanner(state.free_disk_gb);
       const chips = document.getElementById("chips");
       chips.innerHTML = CATEGORIES.map((c, i) =>
         `<span class="chip${i === 0 ? " active" : ""}" data-cat="${c.id}">${esc(c.label)}</span>`).join("");
@@ -777,6 +778,11 @@
         const r = await api("/api/cleanup", { method: "POST", body: JSON.stringify({ deep }) });
         status.textContent = "";
         showToast(`✓ Freed about ${r.freed_human} of disk space.`, "ok");
+        // Re-check the low-disk banner now that space changed.
+        const s = await api("/api/state");
+        const banner = document.getElementById("disk-banner");
+        if (banner && (s.free_disk_gb == null || s.free_disk_gb >= 5)) banner.remove();
+        else renderDiskBanner(s.free_disk_gb);
       } catch (e) {
         status.textContent = "";
         showToast("✗ Cleanup failed: " + e, "err");
@@ -818,6 +824,30 @@
     }
 
     function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+    // Low-disk banner: installs die confusingly when the disk fills mid-way,
+    // so warn up front and point at the one-click cleanup.
+    function renderDiskBanner(freeGb) {
+      if (freeGb == null || freeGb >= 5) return;
+      let el = document.getElementById("disk-banner");
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "disk-banner";
+        el.className = "warn";
+        el.style.cssText = "margin:0 28px 12px; display:flex; align-items:center; gap:12px;";
+        const main = document.querySelector("main");
+        main.parentNode.insertBefore(el, main);
+      }
+      el.innerHTML =
+        `<span style="flex:1">⚠️ <b>Low disk space: ${freeGb} GB free.</b> ` +
+        `Installs need room for dependencies — free some space before installing.</span>` +
+        `<button class="btn" style="white-space:nowrap" id="disk-banner-btn">Free up space</button>`;
+      document.getElementById("disk-banner-btn").onclick = () => {
+        showView("settings");
+        const btn = document.getElementById("cleanup-btn");
+        if (btn) { btn.scrollIntoView({ behavior: "smooth", block: "center" }); cleanupSpace(); }
+      };
+    }
 
     let _toastTimer = null;
     function showToast(message, kind) {
