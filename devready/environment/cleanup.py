@@ -15,9 +15,9 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
-from ..utils import CommandResult, command_exists, console, run_command
+from ..utils import CommandResult, command_exists, console, force_rmtree, run_command
 
 # (label, argv, head-that-must-exist). Every entry is a CACHE: clearing it can
 # never break an installed project — the worst case is a slower next install.
@@ -28,6 +28,29 @@ _CACHE_CLEANERS: List[Tuple[str, List[str], str]] = [
     ("pnpm store", ["pnpm", "store", "prune"], "pnpm"),
     ("yarn cache", ["yarn", "cache", "clean"], "yarn"),
 ]
+
+
+def _npm_cache_dir() -> Optional[Path]:
+    """The directory npm uses for its cache (holds the `_npx` run cache)."""
+    if not command_exists("npm"):
+        return None
+    result = run_command(["npm", "config", "get", "cache"])
+    path = result.stdout.strip()
+    return Path(path) if result.ok and path and path.lower() != "undefined" else None
+
+
+def _extra_cache_dirs() -> List[Tuple[str, Path]]:
+    """Re-downloadable cache dirs that no tool's own `clean` command reaches."""
+    dirs: List[Tuple[str, Path]] = []
+    npm_cache = _npm_cache_dir()
+    if npm_cache:
+        dirs.append(("npx run cache", npm_cache / "_npx"))
+    # cargo keeps downloaded (.crate) + extracted crate sources here; both are
+    # re-fetched on the next build. Keep bin/ (installed tools) and the index.
+    cargo = Path.home() / ".cargo" / "registry"
+    dirs.append(("cargo downloaded crates", cargo / "cache"))
+    dirs.append(("cargo crate sources", cargo / "src"))
+    return dirs
 
 
 def free_disk_bytes() -> int:
@@ -69,6 +92,16 @@ def cleanup_caches(deep: bool = False) -> dict:
         console.print(f"  Clearing {label}…")
         result: CommandResult = run_command(argv)
         details.append((label, result.ok))
+
+    # Caches no built-in "clean" command reaches:
+    #  * npm's `_npx` dir — `npm cache clean` only clears `_cacache`, never the
+    #    npx run cache (which can be hundreds of MB after installs), and
+    #  * cargo's downloaded/extracted crate sources (from Rust/Tauri builds).
+    # Both are pure caches (re-downloaded on demand), so removing them is safe.
+    for label, path in _extra_cache_dirs():
+        if path.exists():
+            console.print(f"  Clearing {label}…")
+            details.append((label, force_rmtree(path)))
 
     env = _docker_env()
     if env is not None:
