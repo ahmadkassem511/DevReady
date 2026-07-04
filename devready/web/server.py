@@ -208,6 +208,7 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
     @app.get("/api/projects")
     def get_projects():
         from ..engine import Engine, _pid_alive
+        from ..environment import env_vars
 
         out = []
         for entry in list_projects():
@@ -219,15 +220,49 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
             procs = engine._state_processes(engine._read_state())
             running = [p for p in procs if p.get("pid") and _pid_alive(p["pid"])]
             ports = [p["port"] for p in (running or procs) if p.get("port")]
+            # First-run secrets wizard: derived live from .env (placeholder
+            # values = keys the user still has to provide), so it self-heals
+            # when the user edits .env by hand. Key NAMES only, never values.
+            pending = env_vars.has_placeholder_api_keys(path / ".env")
             out.append(
                 {
                     "path": str(path),
                     "name": path.name,
                     "status": "running" if running else "stopped",
                     "urls": [f"http://localhost:{port}" for port in ports],
+                    "pending_keys": [
+                        {"name": k, "help_url": env_vars.key_help_url(k)} for k in pending
+                    ],
                 }
             )
         return {"projects": out}
+
+    @app.post("/api/projects/env")
+    async def set_project_env(request: Request):
+        """First-run secrets wizard: write the user's real API keys into .env.
+
+        Accepts ``{path, values: {NAME: value}}``. Values are written only to
+        the project's local .env (never logged, never returned). Responds with
+        the keys still pending so the GUI can re-render the form.
+        """
+        from ..environment import env_vars
+
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        values = body.get("values") or {}
+        target = Path(path)
+        if not path or not target.exists():
+            raise HTTPException(status_code=404, detail="Project folder not found.")
+        if not isinstance(values, dict) or not values:
+            raise HTTPException(status_code=400, detail="No values provided.")
+        written = env_vars.set_env_values(target, values)
+        pending = env_vars.has_placeholder_api_keys(target / ".env")
+        return {
+            "written": written,
+            "pending_keys": [
+                {"name": k, "help_url": env_vars.key_help_url(k)} for k in pending
+            ],
+        }
 
     # -- API: project control panel (start / stop / delete) --------------
     @app.post("/api/projects/start")
@@ -432,6 +467,7 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
                         "urls": job.urls,
                         "needs_docker": job.needs_docker,
                         "onboarding_command": job.onboarding_command,
+                        "pending_keys": job.pending_keys,
                     }
                     yield f"data: {json.dumps(payload)}\n\n"
                     break

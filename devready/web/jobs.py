@@ -81,6 +81,7 @@ class Job:
     urls: List[str] = field(default_factory=list)
     needs_docker: bool = False  # project needs a container engine that's unavailable
     onboarding_command: Optional[str] = None  # one-time setup the user must run
+    pending_keys: List[dict] = field(default_factory=list)  # API keys the user must provide
     queue: "queue.Queue" = field(default_factory=queue.Queue)
 
 
@@ -128,11 +129,23 @@ class JobManager:
                 job.status = "error"
             job.needs_docker = self._read_needs_docker(Path(job.project_dir))
             job.onboarding_command = self._read_onboarding_command(Path(job.project_dir))
+            job.pending_keys = self._read_pending_keys(Path(job.project_dir))
         except Exception as exc:
             job.status = "error"
             self._emit(job, f"✗ Unexpected error: {exc}")
         finally:
             job.queue.put(_DONE)
+
+    @staticmethod
+    def _read_pending_keys(project_dir: Path) -> List[dict]:
+        """API keys still holding placeholder values — the first-run secrets
+        wizard shows these (names + where to get each key, never values)."""
+        from ..environment import env_vars
+
+        return [
+            {"name": k, "help_url": env_vars.key_help_url(k)}
+            for k in env_vars.has_placeholder_api_keys(project_dir / ".env")
+        ]
 
     # -- internals -----------------------------------------------------------
     def _emit(self, job: Job, line: str) -> None:
@@ -212,6 +225,7 @@ class JobManager:
                 job.status = "error"
             job.needs_docker = self._read_needs_docker(target)
             job.onboarding_command = self._read_onboarding_command(target)
+            job.pending_keys = self._read_pending_keys(target)
         except Exception as exc:  # never let a job thread die silently
             job.status = "error"
             self._emit(job, f"✗ Unexpected error: {exc}")

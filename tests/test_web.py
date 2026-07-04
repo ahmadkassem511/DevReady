@@ -327,3 +327,39 @@ def test_key_rejects_non_openrouter_key(client):
     assert "sk-or-" in resp.json()["detail"]
     # Nothing was saved.
     assert client.get("/api/state", headers=h).json()["ai_configured"] is False
+
+
+def test_set_project_env_endpoint(client, tmp_path):
+    # First-run secrets wizard round-trip: a placeholder key is pending, the
+    # user posts a real value, the response shows nothing left pending.
+    proj = tmp_path / "myapp"
+    proj.mkdir()
+    (proj / ".env").write_text(
+        "OPENAI_API_KEY=" + "a" * 48 + "\nPORT=3000\n"
+    )
+    headers = {"X-DevReady-Token": "testtoken"}
+
+    resp = client.post(
+        "/api/projects/env",
+        json={"path": str(proj), "values": {"OPENAI_API_KEY": "sk-real"}},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["written"] == ["OPENAI_API_KEY"]
+    assert data["pending_keys"] == []
+    assert "OPENAI_API_KEY=sk-real" in (proj / ".env").read_text()
+    # And the value is never echoed back.
+    assert "sk-real" not in str(data)
+
+    # Missing project -> 404; no values -> 400.
+    assert client.post(
+        "/api/projects/env",
+        json={"path": str(tmp_path / "nope"), "values": {"A": "b"}},
+        headers=headers,
+    ).status_code == 404
+    assert client.post(
+        "/api/projects/env",
+        json={"path": str(proj), "values": {}},
+        headers=headers,
+    ).status_code == 400

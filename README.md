@@ -229,11 +229,18 @@ where you can:
 - Click a project, read what it does, and press **Install** — DevReady clones
   it, sets everything up, and shows a **live progress log** right in the page.
 - When it's ready, click **Open app** to launch it (e.g. `http://localhost:8501`).
+- **First-run setup, guided.** Many apps (AI chat UIs especially) need *your*
+  API key before they're useful. When DevReady detects that, it shows a
+  **"Add your API key" form** right after install — with a link to the exact
+  provider page where you create the key, a paste box, and a one-click
+  **Restart to apply**. Keys are written only into that project's local
+  `.env` and never leave your computer.
 - **My Projects** is your control panel for everything you've installed: **Run**
   a project, **Open** it in the browser, **Stop** it, **Remove** it from the list,
   or **Delete** it — which really deletes: the whole folder (hidden files and
   packages included) *and* the Docker containers, volumes, and images the
-  project created, so the disk space actually comes back.
+  project created, so the disk space actually comes back. Projects still
+  missing an API key show a **Finish setup** shortcut right on their card.
 - **Settings → Free up disk space** reclaims the shared caches installs fill up
   (pip wheels, npm packages, Docker's unused data) with one click and tells you
   how much it freed.

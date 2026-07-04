@@ -62,7 +62,8 @@ def has_placeholder_api_keys(env_path: Path) -> List[str]:
     if not env_path.exists():
         return []
     try:
-        text = env_path.read_text(encoding="utf-8", errors="replace")
+        # utf-8-sig: strip a Windows BOM, or "﻿NAME" wouldn't match NAME.
+        text = env_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return []
     placeholder = re.compile(r"^[A-Za-z0-9_-]{43,}$")
@@ -76,6 +77,79 @@ def has_placeholder_api_keys(env_path: Path) -> List[str]:
         if name in _AI_API_KEY_NAMES and placeholder.match(value.strip()):
             found.append(name)
     return found
+
+
+# Where to get each provider's API key — shown next to the input in the GUI's
+# "Finish setup" form so a non-technical user knows exactly where to click.
+KEY_PROVIDER_URLS = {
+    "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
+    "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
+    "GEMINI_API_KEY": "https://aistudio.google.com/apikey",
+    "GOOGLE_API_KEY": "https://aistudio.google.com/apikey",
+    "DEEPSEEK_API_KEY": "https://platform.deepseek.com/api_keys",
+    "OPENROUTER_API_KEY": "https://openrouter.ai/keys",
+    "GROQ_API_KEY": "https://console.groq.com/keys",
+    "MISTRAL_API_KEY": "https://console.mistral.ai/api-keys",
+    "TOGETHER_API_KEY": "https://api.together.ai/settings/api-keys",
+    "COHERE_API_KEY": "https://dashboard.cohere.com/api-keys",
+    "REPLICATE_API_KEY": "https://replicate.com/account/api-tokens",
+    "HUGGINGFACE_API_KEY": "https://huggingface.co/settings/tokens",
+    "PERPLEXITY_API_KEY": "https://www.perplexity.ai/settings/api",
+}
+
+
+def key_help_url(name: str) -> str:
+    """The provider page where the user creates this key, or an empty string."""
+    return KEY_PROVIDER_URLS.get(name, "")
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def set_env_values(project_dir: Path, values: Dict[str, str]) -> List[str]:
+    """Write real values for variables into the project's ``.env`` — the write
+    half of the first-run secrets wizard.
+
+    Replaces the line for each existing variable in place (preserving order and
+    comments) and appends any that aren't in the file yet. Names are validated;
+    values are single-line only. Returns the names actually written. Values are
+    never logged.
+    """
+    env_path = project_dir / ".env"
+    clean: Dict[str, str] = {}
+    for name, value in (values or {}).items():
+        name = (name or "").strip()
+        value = (value or "").strip()
+        if not name or not value or not _ENV_NAME_RE.match(name):
+            continue
+        if "\n" in value or "\r" in value:
+            continue  # a key is always one line — reject anything else
+        clean[name] = value
+    if not clean:
+        return []
+
+    # utf-8-sig: a BOM (e.g. from Notepad/PowerShell) would make the first
+    # variable's name compare as "﻿NAME" and dodge in-place replacement —
+    # seen live, producing a duplicated key line. Read stripped, write clean.
+    lines = (
+        env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        if env_path.exists() else []
+    )
+    written: List[str] = []
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name = stripped.partition("=")[0].strip()
+        if name in clean and name not in written:
+            lines[i] = f"{name}={clean[name]}"
+            written.append(name)
+    for name, value in clean.items():
+        if name not in written:
+            lines.append(f"{name}={value}")
+            written.append(name)
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return written
 
 
 def _looks_secret(name: str) -> bool:

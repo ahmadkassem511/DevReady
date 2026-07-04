@@ -556,6 +556,11 @@
               );
             };
           }
+          // First-run secrets wizard: the app installed fine but needs the
+          // user's real API key(s) before it's useful — collect them here.
+          if (msg.pending_keys && msg.pending_keys.length && msg.project_dir) {
+            actions.appendChild(buildKeysForm(msg.project_dir, msg.pending_keys, msg.status === "success"));
+          }
           const close = document.createElement("button");
           close.className = "btn secondary"; close.textContent = "Close";
           close.onclick = () => { closeOverlay(); loadLibrary(); };
@@ -563,6 +568,82 @@
         }
       };
       es.onerror = () => { es.close(); statusEl.textContent = "Connection lost."; };
+    }
+
+    // --- first-run secrets wizard -------------------------------------------
+    // Builds the "add your API keys" form (used in the install modal and in a
+    // My Projects card). Saves values to the project's local .env only.
+    function buildKeysForm(projectPath, pendingKeys, offerRestart) {
+      const card = document.createElement("div");
+      card.className = "note";
+      card.style.cssText = "width:100%;margin-top:10px;padding:12px 14px;border:1px solid var(--yellow,#d29922);border-radius:8px;background:rgba(210,153,34,.12);";
+      let rows = pendingKeys.map(k => {
+        const link = k.help_url
+          ? ` <a href="${esc(k.help_url)}" target="_blank" rel="noopener" style="font-size:12px">Get your key ↗</a>` : "";
+        return `<div style="margin-bottom:8px">
+          <label style="display:block;font-size:12px;margin-bottom:3px"><b>${esc(k.name)}</b>${link}</label>
+          <input type="password" data-key="${esc(k.name)}" placeholder="paste your ${esc(k.name)} here"
+                 style="width:100%;box-sizing:border-box" />
+        </div>`;
+      }).join("");
+      card.innerHTML =
+        `<div style="color:var(--yellow,#d29922);font-weight:600;margin-bottom:6px">🔑 Add your API key${pendingKeys.length > 1 ? "s" : ""} to use this app</div>` +
+        `<div class="muted" data-role="explain" style="font-size:12px;margin-bottom:10px">The app installed fine, but it talks to an AI provider and needs your key. ` +
+        `Keys are saved only into this project's local <code>.env</code> — they never leave your computer.</div>` +
+        rows +
+        `<div class="row" style="margin-top:6px"><button class="btn" data-role="save">Save key${pendingKeys.length > 1 ? "s" : ""}</button>` +
+        `<span class="muted" data-role="status" style="font-size:12px"></span></div>`;
+
+      const saveBtn = card.querySelector('[data-role="save"]');
+      const statusEl = card.querySelector('[data-role="status"]');
+      saveBtn.onclick = async () => {
+        const values = {};
+        card.querySelectorAll("input[data-key]").forEach(inp => {
+          if (inp.value.trim()) values[inp.getAttribute("data-key")] = inp.value.trim();
+        });
+        if (!Object.keys(values).length) { statusEl.textContent = "Paste at least one key first."; return; }
+        saveBtn.disabled = true; saveBtn.textContent = "Saving…";
+        try {
+          const r = await api("/api/projects/env", { method: "POST", body: JSON.stringify({ path: projectPath, values }) });
+          const left = (r.pending_keys || []).length;
+          if (left === 0) {
+            card.style.borderColor = "var(--green)";
+            card.querySelector("div").style.color = "var(--green)";
+            card.querySelector("div").textContent = "✓ Keys saved.";
+            card.querySelectorAll("input[data-key],label,[data-role='explain']").forEach(el => el.remove());
+            statusEl.textContent = "";
+            saveBtn.remove();
+            if (offerRestart) {
+              const rbtn = document.createElement("button");
+              rbtn.className = "btn"; rbtn.textContent = "Restart app to apply";
+              rbtn.onclick = async () => {
+                rbtn.disabled = true; rbtn.textContent = "Restarting…";
+                try {
+                  await api("/api/projects/stop", { method: "POST", body: JSON.stringify({ path: projectPath }) });
+                  const resp = await api("/api/projects/start", { method: "POST", body: JSON.stringify({ path: projectPath }) });
+                  closeOverlay();
+                  streamJob(resp.job_id, "Restarting " + (projectPath.split(/[\\/]/).pop() || "app"), "Restarting…", "✓ Running!");
+                } catch (e) { showToast("✗ Restart failed: " + e, "err"); rbtn.disabled = false; rbtn.textContent = "Restart app to apply"; }
+              };
+              card.querySelector(".row").appendChild(rbtn);
+            } else {
+              showToast("✓ Keys saved — press Run to start the app.", "ok");
+            }
+          } else {
+            statusEl.textContent = `Saved. ${left} key${left > 1 ? "s" : ""} still needed.`;
+            saveBtn.disabled = false; saveBtn.textContent = "Save keys";
+            card.querySelectorAll("input[data-key]").forEach(inp => {
+              if (!(r.pending_keys || []).some(k => k.name === inp.getAttribute("data-key"))) {
+                inp.closest("div").remove();
+              } else { inp.value = ""; }
+            });
+          }
+        } catch (e) {
+          statusEl.textContent = "✗ " + e;
+          saveBtn.disabled = false; saveBtn.textContent = "Save keys";
+        }
+      };
+      return card;
     }
 
     // Kick off a Docker Desktop install (one approval) or open its download page.
@@ -615,14 +696,30 @@
         } else { // missing
           buttons += `<button class="btn secondary" onclick="removeProject(this, '${enc}', '${esc(p.name)}', false)">Remove from list</button>`;
         }
+        const needsKeys = (p.pending_keys || []).length
+          ? `<div class="warn" style="margin:8px 0 0; font-size:12px; padding:6px 10px;">🔑 Needs your API key${p.pending_keys.length > 1 ? "s" : ""} ` +
+            `(${p.pending_keys.map(k => esc(k.name)).join(", ")}) — ` +
+            `<a href="#" onclick="showKeysForm(this, '${enc}'); return false;">Finish setup</a></div>`
+          : "";
         return `
-        <div class="card">
+        <div class="card" data-path="${enc}">
           <h3>${esc(p.name)}</h3>
           <span class="lang"><span class="status-dot dot-${p.status}"></span> ${p.status}</span>
-          <p class="muted">${esc(p.path)}</p>
+          <p class="muted">${esc(p.path)}</p>${needsKeys}
           <div class="actions">${buttons}</div>
         </div>`;
       }).join("");
+    }
+
+    // Expand the first-run secrets form inside a My Projects card.
+    async function showKeysForm(link, encPath) {
+      const path = decodeURIComponent(encPath);
+      const card = link.closest(".card");
+      if (card.querySelector('[data-role="save"]')) return; // already open
+      const { projects } = await api("/api/projects");
+      const p = projects.find(x => x.path === path);
+      if (!p || !(p.pending_keys || []).length) { loadLibrary(); return; }
+      card.appendChild(buildKeysForm(path, p.pending_keys, p.status === "running"));
     }
 
     async function startProject(encPath, name) {
