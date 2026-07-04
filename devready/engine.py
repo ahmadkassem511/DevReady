@@ -38,6 +38,7 @@ from .utils import (
     print_banner,
     print_step,
     run_command,
+    run_command_teed,
 )
 
 # Total number of pipeline steps, used for the "[n/TOTAL]" headers.
@@ -274,6 +275,186 @@ class Engine:
         served = self._launch_targets(targets) if targets else []
         if not served:
             self._no_server_help()
+
+    # =========================================================================
+    # Public command: update
+    # =========================================================================
+
+    # Files whose change means "re-install this language's dependencies".
+    _UPDATE_DEP_FILES = {
+        "Python": ("requirements", "pyproject.toml", "setup.py", "setup.cfg",
+                   "Pipfile", "poetry.lock", "uv.lock"),
+        "Node.js": ("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"),
+        "Rust": ("Cargo.toml", "Cargo.lock"),
+        "Go": ("go.mod", "go.sum"),
+        "Ruby": ("Gemfile",),
+        "PHP": ("composer.json", "composer.lock"),
+        "Java": ("pom.xml", "build.gradle"),
+        ".NET": (".csproj", ".sln", "packages.config"),
+    }
+
+    @classmethod
+    def _dep_files_changed(cls, language: str, changed_paths: List[str]) -> bool:
+        """True if any changed path is a dependency file for this language."""
+        patterns = cls._UPDATE_DEP_FILES.get(language, ())
+        return any(pat in Path(p).name for p in changed_paths for pat in patterns)
+
+    def _published_package_name(self) -> Optional[str]:
+        """The package name recorded by a published-wheel install, or None."""
+        marker = self.project_dir / ".venv" / version_manager._PUBLISHED_MARKER
+        try:
+            return marker.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+
+    def update(self) -> bool:
+        """Update an installed project and restart it — one command, not
+        delete-and-reinstall.
+
+        Pulls the latest source (fast-forward only — never clobbers local
+        edits), then re-runs ONLY the setup that the diff shows is needed:
+        dependency re-install per language whose lockfiles changed, a
+        published-wheel upgrade for prebuilt installs (the wheel IS the app),
+        fresh Docker images for container apps, and migrations when migration
+        files changed. Finishes by restarting the app.
+        """
+        print_banner("[bold cyan]DevReady[/bold cyan] — updating your project ⬆")
+        console.print(f"[muted]Project: {self.project_dir}[/muted]\n")
+        cwd = str(self.project_dir)
+
+        if not (self.project_dir / ".git").exists():
+            console.print(
+                "  [warning]This folder isn't a git repository, so DevReady can't pull "
+                "updates for it. Delete the project and install it again to get the "
+                "latest version.[/warning]"
+            )
+            return False
+
+        if not run_command(["git", "remote"], cwd=cwd).stdout.strip():
+            console.print(
+                "  [warning]This project has no git remote — there's nowhere to pull "
+                "updates from. (Projects installed from a GitHub URL update fine.)[/warning]"
+            )
+            return False
+
+        old = run_command(["git", "rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+        console.print("  Checking for updates (git pull)…")
+        pull = run_command_teed(["git", "pull", "--ff-only"], cwd=cwd)
+        if not pull.ok:
+            console.print(
+                "  [warning]Couldn't fast-forward — this copy has local changes or a "
+                "diverged history. Commit/stash your changes, or delete the project "
+                "and re-install for a clean latest copy.[/warning]"
+            )
+            return False
+        new = run_command(["git", "rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+
+        self.detections = detect_stack(self.project_dir)
+        code_changed = bool(old and new and old != new)
+        changed: List[str] = []
+        if code_changed:
+            diff = run_command(["git", "diff", "--name-only", f"{old}..{new}"], cwd=cwd)
+            changed = [line.strip() for line in diff.stdout.splitlines() if line.strip()]
+            count = run_command(
+                ["git", "rev-list", "--count", f"{old}..{new}"], cwd=cwd
+            ).stdout.strip()
+            console.print(
+                f"  [success]Pulled {count or 'the latest'} commit(s) — "
+                f"{len(changed)} file(s) changed.[/success]"
+            )
+        else:
+            console.print("  [muted]Source code already up to date.[/muted]")
+
+        deps_refreshed = False
+
+        # Published-wheel installs (e.g. Open WebUI): the wheel IS the app —
+        # upgrade it from PyPI regardless of what the source tree did.
+        published = self._published_package_name()
+        if published:
+            console.print(f"  Upgrading the published package [bold]{published}[/bold]…")
+            venv_python = version_manager._venv_python_tool(
+                self.project_dir / ".venv", "python"
+            )
+            result = run_command_teed(
+                [venv_python, "-m", "pip", "install", "--upgrade", published], cwd=cwd
+            )
+            deps_refreshed = result.ok
+        elif code_changed:
+            healer = self._make_healer(self.project_dir)
+            for det in self.detections:
+                if not self._dep_files_changed(det.language, changed):
+                    continue
+                console.print(
+                    f"  Dependency files changed for [bold]{det.language}[/bold] — re-installing…"
+                )
+                outcomes = version_manager.setup_environment(self.project_dir, det, healer)
+                deps_refreshed = True
+                for outcome in outcomes:
+                    if not outcome.ok:
+                        console.print(
+                            f"  [warning]A setup command failed (exit {outcome.returncode}): "
+                            f"{outcome.command}[/warning]"
+                        )
+
+        # Container apps: pull fresh images so the restart runs the new version.
+        self._refresh_docker_app()
+
+        # Migrations: run when migration files changed, or after a dependency
+        # refresh (new deps often ship new schema).
+        migration_markers = ("migration", "migrate", "alembic", "prisma")
+        if code_changed and (
+            deps_refreshed
+            or any(marker in p.lower() for p in changed for marker in migration_markers)
+        ):
+            console.print("  Running database migrations (schema may have changed)…")
+            self._step_migrations(header=False)
+
+        if any(".env." in Path(p).name for p in changed):
+            console.print(
+                "  [warning]The project's example env file changed — new settings may "
+                "exist. Compare your .env with .env.example if something misbehaves.[/warning]"
+            )
+
+        console.print("\n  Restarting with the updated version…")
+        self.stop()
+        self.run()
+        return True
+
+    def _refresh_docker_app(self) -> None:
+        """Pull fresh images for a container-based app before its restart.
+
+        The repo's source can be unchanged while the published image moved —
+        so this runs on every update for docker-launched apps. Removing the
+        old app container makes the relaunch recreate it FROM the new image
+        (a plain `docker start` would keep running the old one).
+        """
+        state = self._read_state()
+        launches = state.get("last_launch") or []
+        images = sorted({
+            img for p in launches
+            if (img := self._docker_run_image(p.get("command") or []))
+        })
+        names = sorted({
+            n for p in launches
+            if (n := self._docker_container_name(p.get("command") or []))
+        })
+        compose = self._find_compose_file()
+        uses_compose = compose is not None and state.get("docker")
+        if not images and not uses_compose:
+            return
+
+        runtime, _ = self._ensure_runtime()
+        if not runtime:
+            return  # guidance already printed; restart will handle the rest
+        env = self._launch_env()
+        for image in images:
+            console.print(f"  Pulling the latest image [bold]{image}[/bold]…")
+            run_command_teed(["docker", "pull", image], env=env)
+        for name in names:
+            run_command(["docker", "rm", "-f", name], env=env)
+        if uses_compose:
+            console.print("  Pulling the latest images for the compose services…")
+            run_command_teed(self._compose_base_cmd(compose) + ["pull"], cwd=str(self.project_dir), env=env)
 
     # -- Step 1: Project detection -------------------------------------------
     def _step_detect(self) -> None:
@@ -935,8 +1116,9 @@ class Engine:
         return env
     # -- Step 8: Database migrations -----------------------------------------
 
-    def _step_migrations(self) -> None:
-        print_step(8, TOTAL_STEPS, "Database Migrations")
+    def _step_migrations(self, header: bool = True) -> None:
+        if header:
+            print_step(8, TOTAL_STEPS, "Database Migrations")
 
         env = self._migration_env()
         cwd = str(self.project_dir)

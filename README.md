@@ -306,6 +306,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 |---------|-------------|
 | `devready start [path] [--yes]` | Run the full detect → set up → launch pipeline. **Use this the first time** (and after `git pull`). Add `--yes`/`-y` for an unattended run that accepts every prompt. |
 | `devready run [path]` | **Relaunch a set-up project — fast.** Skips all setup and relaunches every saved component with the same documented commands (they survive `stop`). Docker apps restart via `docker start` — instant, no duplicate containers. |
+| `devready update [path]` | **Update an installed project and restart it** — one command instead of delete-and-reinstall. Pulls the latest code (fast-forward only, never clobbers local edits), re-runs *only* what the changes need (dependency installs per changed lockfile, migrations, fresh Docker images, published-package upgrades), then relaunches. Also the **Update** button in the GUI. |
 | `devready ui [--no-browser]` | **Launch the browser GUI** — the easy, click-to-install app. Starts a local server (127.0.0.1 only) and opens it in your browser. Requires the `ui` extra (`pip install ".[ui]"`). |
 | `devready list` | List every project DevReady has set up, with its run status and URLs. |
 | `devready status [path]` | Show run state and URL(s) for each component — including the real state of app **containers** (works on the Podman fallback too). |

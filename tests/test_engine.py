@@ -795,3 +795,130 @@ def test_launch_env_uses_bash_for_shell_script_projects(tmp_path, monkeypatch):
     env = eng._launch_env()
     assert env is not None
     assert env["npm_config_script_shell"] == r"C:\Git\bash.exe"
+
+
+# --- devready update ---------------------------------------------------------
+
+def _git(cwd, *args):
+    import subprocess
+    r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+    assert r.returncode == 0, f"git {args} failed: {r.stderr}"
+    return r.stdout.strip()
+
+
+def _make_origin_and_clone(tmp_path, filename="package.json", content='{"name":"app"}'):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q")
+    _git(origin, "config", "user.email", "t@t")
+    _git(origin, "config", "user.name", "t")
+    (origin / filename).write_text(content)
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "init")
+    proj = tmp_path / "proj"
+    _git(tmp_path, "clone", "-q", str(origin), str(proj))
+    _git(proj, "config", "user.email", "t@t")
+    _git(proj, "config", "user.name", "t")
+    return origin, proj
+
+
+def test_update_pulls_and_reinstalls_changed_deps(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+
+    origin, proj = _make_origin_and_clone(tmp_path)
+    # Upstream gains a commit that changes the Node dependency file.
+    (origin / "package.json").write_text('{"name":"app","dependencies":{"x":"1"}}')
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "bump deps")
+
+    eng = Engine(project_dir=proj)
+    setup_calls, lifecycle = [], []
+    monkeypatch.setattr(
+        engine_mod.version_manager, "setup_environment",
+        lambda pdir, det, healer: setup_calls.append(det.language) or [],
+    )
+    monkeypatch.setattr(eng, "_step_migrations", lambda header=True: lifecycle.append("migrate"))
+    monkeypatch.setattr(eng, "stop", lambda: lifecycle.append("stop"))
+    monkeypatch.setattr(eng, "run", lambda: lifecycle.append("run"))
+
+    assert eng.update() is True
+    assert setup_calls == ["Node.js"]          # deps changed -> re-install
+    assert lifecycle == ["migrate", "stop", "run"]  # then restart
+    # And the pull really happened.
+    assert "dependencies" in (proj / "package.json").read_text()
+
+
+def test_update_skips_reinstall_when_no_dep_change(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+
+    origin, proj = _make_origin_and_clone(tmp_path)
+    (origin / "readme.md").write_text("docs only\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "docs")
+
+    eng = Engine(project_dir=proj)
+    monkeypatch.setattr(
+        engine_mod.version_manager, "setup_environment",
+        lambda *a: (_ for _ in ()).throw(AssertionError("docs-only change must not re-install")),
+    )
+    lifecycle = []
+    monkeypatch.setattr(eng, "stop", lambda: lifecycle.append("stop"))
+    monkeypatch.setattr(eng, "run", lambda: lifecycle.append("run"))
+
+    assert eng.update() is True
+    assert lifecycle == ["stop", "run"]
+
+
+def test_update_refuses_diverged_history(tmp_path, monkeypatch):
+    origin, proj = _make_origin_and_clone(tmp_path)
+    # Local commit + different upstream commit -> ff-only must refuse.
+    (proj / "local.txt").write_text("mine")
+    _git(proj, "add", "-A")
+    _git(proj, "commit", "-q", "-m", "local")
+    (origin / "package.json").write_text('{"name":"app","v":2}')
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "upstream")
+
+    eng = Engine(project_dir=proj)
+    monkeypatch.setattr(eng, "run", lambda: (_ for _ in ()).throw(AssertionError("must not restart")))
+    assert eng.update() is False
+    assert (proj / "local.txt").exists()  # local work untouched
+
+
+def test_update_requires_git_repo(tmp_path):
+    proj = tmp_path / "notgit"
+    proj.mkdir()
+    assert Engine(project_dir=proj).update() is False
+
+
+def test_update_upgrades_published_package(tmp_path, monkeypatch):
+    import devready.engine as engine_mod
+    from devready.environment import version_manager as vm
+    from devready.utils import CommandResult
+
+    origin, proj = _make_origin_and_clone(tmp_path)
+    marker_dir = proj / ".venv"
+    marker_dir.mkdir()
+    (marker_dir / vm._PUBLISHED_MARKER).write_text("open-webui")
+
+    eng = Engine(project_dir=proj)
+    teed = []
+    monkeypatch.setattr(
+        engine_mod, "run_command_teed",
+        lambda cmd, **k: teed.append(list(cmd)) or CommandResult("x", 0),
+    )
+    monkeypatch.setattr(eng, "_step_migrations", lambda header=True: None)
+    monkeypatch.setattr(eng, "stop", lambda: None)
+    monkeypatch.setattr(eng, "run", lambda: None)
+
+    assert eng.update() is True
+    # The wheel IS the app: pip install --upgrade <name> must have run.
+    assert any(c[-3:] == ["install", "--upgrade", "open-webui"] for c in teed)
+
+
+def test_dep_files_changed_mapping(tmp_path):
+    eng = Engine(project_dir=tmp_path)
+    assert eng._dep_files_changed("Python", ["backend/requirements.txt"]) is True
+    assert eng._dep_files_changed("Node.js", ["yarn.lock"]) is True
+    assert eng._dep_files_changed("Node.js", ["src/app.ts"]) is False
+    assert eng._dep_files_changed("Python", ["docs/readme.md"]) is False

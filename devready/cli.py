@@ -111,6 +111,25 @@ def run(
 
 
 @app.command()
+def update(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Project directory to update (defaults to the current directory).",
+    ),
+) -> None:
+    """Update an installed project to its latest version and restart it.
+
+    Pulls the latest code (never clobbering local edits), re-runs only the
+    setup steps the changes require (dependency installs, migrations, fresh
+    Docker images, published-package upgrades), then relaunches the app —
+    one command instead of delete-and-reinstall.
+    """
+    ok = Engine(project_dir=path).update()
+    if not ok:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def status(
     path: Path = typer.Argument(Path("."), help="Project directory."),
 ) -> None:

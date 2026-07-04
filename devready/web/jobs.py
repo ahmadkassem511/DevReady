@@ -108,19 +108,30 @@ class JobManager:
         Streams the same way as an install, but runs ``devready run`` (fast, no
         setup) instead of ``devready start``.
         """
+        return self._start_cli_job(project_dir, verb="run", label="Starting")
+
+    def start_update(self, project_dir: str) -> Job:
+        """Update an installed project (the GUI's 'Update' button):
+        ``devready update`` pulls the latest code, re-runs only the setup the
+        changes need, and restarts the app."""
+        return self._start_cli_job(project_dir, verb="update", label="Updating")
+
+    def _start_cli_job(self, project_dir: str, verb: str, label: str) -> Job:
         path = Path(project_dir)
         job = Job(id=uuid.uuid4().hex, repo_url="", name=path.name)
         job.project_dir = str(path)
         self._jobs[job.id] = job
-        threading.Thread(target=self._run_relaunch, args=(job,), daemon=True).start()
+        threading.Thread(
+            target=self._run_cli, args=(job, verb, label), daemon=True
+        ).start()
         return job
 
-    def _run_relaunch(self, job: Job) -> None:
-        """Run ``devready run <dir>`` for an existing project, streaming output."""
+    def _run_cli(self, job: Job, verb: str, label: str) -> None:
+        """Run ``devready <verb> <dir>`` for an existing project, streaming output."""
         try:
-            self._emit(job, f"→ Starting {job.name} …")
+            self._emit(job, f"→ {label} {job.name} …")
             code = self._stream(
-                [sys.executable, "-m", "devready", "run", job.project_dir], job
+                [sys.executable, "-m", "devready", verb, job.project_dir], job
             )
             if code == 0:
                 job.status = "success"

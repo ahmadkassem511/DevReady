@@ -284,6 +284,16 @@ def create_app(token: Optional[str] = None, job_manager: Optional[JobManager] = 
         job = app.state.jobs.start_relaunch(path)
         return {"job_id": job.id, "name": job.name}
 
+    @app.post("/api/projects/update")
+    async def update_project(request: Request):
+        """Update an installed project: pull latest, re-setup what changed, restart."""
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        if not path or not Path(path).exists():
+            raise HTTPException(status_code=404, detail="Project folder not found.")
+        job = app.state.jobs.start_update(path)
+        return {"job_id": job.id, "name": job.name}
+
     @app.post("/api/projects/stop")
     async def stop_project(request: Request):
         from ..engine import Engine
