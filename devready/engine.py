@@ -72,6 +72,8 @@ class Engine:
         self._failed_languages: set = set()  # languages that failed at root — skip in subprojects
         self._extra_path: Optional[str] = None  # dir to prepend on launch (e.g. podman docker-shim)
         self._container_runtime = None  # cached (name, path_prefix) once checked this run
+        self._compose_started = False  # True once we bring up this project's compose stack
+        self._compose_ports: set = set()  # host ports that compose stack publishes
 
     def _ensure_runtime(self):
         """Ensure a container engine once per run (cached) and apply its PATH prefix.
@@ -711,6 +713,10 @@ class Engine:
         svc_env = self._launch_env()  # carries the engine's PATH (e.g. podman shim)
 
         if compose is not None:
+            # A compose stack for this project is now (being) brought up. Its
+            # containers may publish the app's own web port — the launch step
+            # uses this to avoid starting a SECOND, colliding copy of the app.
+            self._compose_started = True
             console.print(f"  Starting services from {compose.name} (docker compose up -d)…")
             # Validate compose config before running — catches missing-variable errors
             # early with a clear message.
@@ -777,6 +783,10 @@ class Engine:
             # show them, so "I see nothing in Docker Desktop" is never a mystery.
             if self._report_compose_status(base_cmd, svc_env):
                 self._write_state(docker=True)
+                # Record which host ports the stack publishes, so the launch
+                # step can reuse the app's container instead of starting a
+                # second, colliding copy of a compose-run web app.
+                self._compose_ports = self._compose_published_ports(svc_env)
             return
 
         # No compose file, but the project talks to a database/cache — provision
@@ -869,6 +879,21 @@ class Engine:
             if candidate.exists():
                 return candidate
         return None
+
+    def _compose_base_cmd(self, compose: Optional[Path] = None) -> List[str]:
+        """`docker compose` (or `docker-compose`) with this project's --env-file
+        and detected --profile — so `down`/`stop` target the SAME services `up`
+        started. Without the profile, a profile-gated app (e.g. NextChat's
+        ``no-proxy`` service) isn't stopped by a bare ``compose down``."""
+        base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
+        if (self.project_dir / ".env").exists():
+            base += ["--env-file", ".env"]
+        compose = compose or self._find_compose_file()
+        if compose is not None:
+            profile = self._detect_compose_profiles(compose)
+            if profile:
+                base += ["--profile", profile]
+        return base
 
     @staticmethod
     def _docker_compose_v2() -> bool:
@@ -1203,6 +1228,60 @@ class Engine:
             return token  # first positional after the flags = the image
         return None
 
+    @staticmethod
+    def _port_is_open(port: int, host: str = "127.0.0.1") -> bool:
+        """True if something is already accepting TCP connections on this port."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            return sock.connect_ex((host, port)) == 0
+
+    @staticmethod
+    def _port_serves_http(port: int) -> bool:
+        """True if the port answers an HTTP request — distinguishes a web app
+        (compose's app container) from a database/cache port (postgres/redis),
+        which accept TCP but don't speak HTTP."""
+        try:
+            httpx.get(f"http://127.0.0.1:{port}", timeout=2)
+            return True  # any HTTP response (even 4xx/5xx) means a web server
+        except Exception:
+            return False
+
+    def _compose_web_port(self, target_port: Optional[int]) -> Optional[int]:
+        """A compose-published port already serving the app over HTTP that a web
+        source-run should reuse instead of starting a second, colliding copy.
+
+        Prefers the target's own port; otherwise any published port that answers
+        HTTP (self-heals a saved port that drifted to 3001 in an earlier
+        double-run). Returns None when the compose stack only exposes non-web
+        ports (a DB/cache), so a genuine web launch still runs.
+        """
+        if not (self._compose_started and self._compose_ports):
+            return None
+        # Give a just-started container a few seconds to begin serving.
+        for _ in range(5):
+            if target_port and target_port in self._compose_ports and self._port_serves_http(target_port):
+                return target_port
+            for candidate in sorted(self._compose_ports):
+                if self._port_serves_http(candidate):
+                    return candidate
+            time.sleep(1)
+        return None
+
+    def _compose_published_ports(self, env: Optional[dict]) -> set:
+        """Host ports the running compose stack publishes (best-effort)."""
+        base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
+        result = run_command(
+            base + ["ps", "--format", "json"], cwd=str(self.project_dir), env=env
+        )
+        if not result.ok:
+            return set()
+        # Version-robust: scrape published ports from the JSON regardless of
+        # whether compose emitted an array or newline-delimited objects.
+        return {
+            int(m) for m in re.findall(r'"PublishedPort"\s*:\s*(\d+)', result.stdout)
+            if int(m) != 0
+        }
+
     def _docker_container_exists(self, name: str, env: Optional[dict] = None) -> bool:
         """True if a container with this exact name exists (running or stopped)."""
         result = run_command(
@@ -1239,6 +1318,27 @@ class Engine:
         for target in targets:
             spawn_command = target["command"]
             spawn_timeout, spawn_detached = port_timeout, expect_detached
+            port = target.get("port")
+
+            # The app is already served here. If this project's compose stack
+            # publishes a port that already answers HTTP (its container IS the
+            # app, e.g. NextChat on 3000), starting a source run (`npm run dev`)
+            # too would collide and drift to 3001 while recompiling from
+            # scratch. Reuse the container instead — no second copy, no port
+            # drift (self-heals even a previously-drifted saved port).
+            if not self._docker_container_name(spawn_command):
+                reuse = self._compose_web_port(port)
+                if reuse:
+                    console.print(
+                        f"  [success]✓ {target['name']} is already served by this project's "
+                        f"container on http://localhost:{reuse} — reusing it (not starting a "
+                        f"second copy).[/success]"
+                    )
+                    records.append({
+                        "name": target["name"], "pid": None, "command": target["command"],
+                        "port": reuse, "announced_port": reuse, "cwd": target["cwd"],
+                    })
+                    continue
 
             # `docker run --name X …`: the launcher exits immediately — the
             # container is the app. Remember its name so stop/status can manage
@@ -2328,8 +2428,10 @@ class Engine:
 
         if state.get("docker") and command_exists("docker"):
             console.print("  Stopping Docker services…")
-            base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
-            run_command(base + ["down"], cwd=str(self.project_dir), capture=False, env=svc_env)
+            run_command(
+                self._compose_base_cmd() + ["down", "--remove-orphans"],
+                cwd=str(self.project_dir), capture=False, env=svc_env,
+            )
 
         # App containers launched via a documented `docker run --name …` — the
         # launcher pid is long gone, so stop them by name. The container itself
@@ -2374,9 +2476,8 @@ class Engine:
         # Compose stack: containers + named volumes + locally built images.
         if self._find_compose_file() is not None:
             console.print("  Removing this project's Docker services (compose down -v)…")
-            base = ["docker", "compose"] if self._docker_compose_v2() else ["docker-compose"]
             run_command(
-                base + ["down", "--volumes", "--rmi", "local"],
+                self._compose_base_cmd() + ["down", "--volumes", "--rmi", "local", "--remove-orphans"],
                 cwd=str(self.project_dir), env=svc_env,
             )
 

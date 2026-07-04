@@ -319,6 +319,80 @@ def test_resolve_server_command_unresolvable(tmp_path, monkeypatch):
     assert eng._resolve_server_command("openclaw gateway run") is None
 
 
+def test_compose_stop_passes_profile(tmp_path, monkeypatch):
+    # NextChat's services are gated behind a profile; `compose down` without it
+    # leaves the app container running (seen live on port 3000). stop() must
+    # pass the detected --profile so the app is actually stopped.
+    import devready.engine as engine_mod
+    from devready.utils import CommandResult
+
+    (tmp_path / "docker-compose.yml").write_text(
+        'services:\n  web:\n    profiles: [ "no-proxy" ]\n    image: x\n    ports:\n      - 3000:3000\n'
+    )
+    (tmp_path / ".env").write_text("FOO=bar\n")
+    eng = Engine(project_dir=tmp_path)
+    eng._write_state(docker=True, processes=[])
+    monkeypatch.setattr(engine_mod, "command_exists", lambda n: n == "docker")
+    monkeypatch.setattr(Engine, "_docker_compose_v2", staticmethod(lambda: True))
+    ran = []
+    monkeypatch.setattr(
+        engine_mod, "run_command",
+        lambda cmd, **k: ran.append(list(cmd)) or CommandResult("x", 0),
+    )
+    eng.stop()
+    down = next((c for c in ran if "down" in c), None)
+    assert down is not None
+    assert "--profile" in down and "no-proxy" in down   # the gated app is targeted
+    assert "--env-file" in down                          # .env passed so vars resolve
+
+
+def test_compose_web_port_reuses_http_serving_port(tmp_path, monkeypatch):
+    # NextChat: compose serves the app on 3000; a prior double-run drifted the
+    # saved web target to 3001. _compose_web_port must return 3000 (the HTTP
+    # port) regardless of the drifted target port, self-healing the drift.
+    eng = Engine(project_dir=tmp_path)
+    eng._compose_started = True
+    eng._compose_ports = {3000}
+    monkeypatch.setattr(eng, "_port_serves_http", lambda p: p == 3000)
+    assert eng._compose_web_port(3001) == 3000   # drifted target -> heals to 3000
+    assert eng._compose_web_port(3000) == 3000
+    assert eng._compose_web_port(None) == 3000
+
+
+def test_compose_web_port_ignores_db_only_stack(tmp_path, monkeypatch):
+    # Compose runs only a database (5432, no HTTP); the web app is a real npm
+    # run on 3000 — the source launch MUST proceed, so this returns None.
+    import devready.engine as em
+    monkeypatch.setattr(em.time, "sleep", lambda s: None)  # instant settle loop
+    eng = Engine(project_dir=tmp_path)
+    eng._compose_started = True
+    eng._compose_ports = {5432}
+    monkeypatch.setattr(eng, "_port_serves_http", lambda p: False)
+    assert eng._compose_web_port(3000) is None
+
+
+def test_launch_reuses_compose_app_instead_of_second_copy(tmp_path, monkeypatch):
+    # The end-to-end guard: when the compose app already serves the port, the
+    # saved `npm run dev` target must NOT be spawned (which would drift to 3001).
+    eng = Engine(project_dir=tmp_path)
+    eng._compose_started = True
+    eng._compose_ports = {3000}
+    monkeypatch.setattr(eng, "_port_serves_http", lambda p: p == 3000)
+    monkeypatch.setattr(
+        eng, "_spawn_and_check",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not start a second copy")),
+    )
+    monkeypatch.setattr(eng, "_announce_running", lambda records: [
+        f"http://localhost:{r['port']}" for r in records if r.get("port")
+    ])
+    served = eng._launch_targets([{
+        "name": "root", "cwd": str(tmp_path),
+        "command": ["npm", "run", "dev"], "port": 3001,  # drifted saved port
+    }])
+    assert served == ["http://localhost:3000"]  # reused the container's port
+    assert eng._read_state()["processes"][0]["port"] == 3000
+
+
 def test_argv_needs_docker(tmp_path):
     eng = Engine(project_dir=tmp_path)
     assert eng._argv_needs_docker(["docker", "run", "-p", "8080:8080", "img"]) is True
