@@ -116,6 +116,11 @@ class JobManager:
         changes need, and restarts the app."""
         return self._start_cli_job(project_dir, verb="update", label="Updating")
 
+    def start_fix(self, project_dir: str) -> Job:
+        """Diagnose and repair a project that's set up but not working (the
+        GUI's 'Fix' button): ``devready fix``."""
+        return self._start_cli_job(project_dir, verb="fix", label="Diagnosing")
+
     def _start_cli_job(self, project_dir: str, verb: str, label: str) -> Job:
         path = Path(project_dir)
         job = Job(id=uuid.uuid4().hex, repo_url="", name=path.name)

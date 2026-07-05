@@ -130,6 +130,25 @@ def update(
 
 
 @app.command()
+def fix(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Project directory to diagnose and repair (defaults to the current directory).",
+    ),
+) -> None:
+    """Diagnose and repair a project that's set up but not working right now.
+
+    The "day two" counterpart to devready start's self-healing install: checks
+    for a broken venv/node_modules, a missing .env, a crashed container, and
+    known error signatures in the last run's log, repairs what it safely can,
+    and restarts the app so you see the result immediately.
+    """
+    ok = Engine(project_dir=path).fix()
+    if not ok:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def status(
     path: Path = typer.Argument(Path("."), help="Project directory."),
 ) -> None:

@@ -456,6 +456,269 @@ class Engine:
             console.print("  Pulling the latest images for the compose services…")
             run_command_teed(self._compose_base_cmd(compose) + ["pull"], cwd=str(self.project_dir), env=env)
 
+    # =========================================================================
+    # Public command: fix (the runtime doctor)
+    # =========================================================================
+
+    # Log phrases meaning "something else is already bound to this port" —
+    # never auto-killed (we can't safely tell a stranger's process from a
+    # stale one), but always reported so the user has an actionable next step.
+    _PORT_CONFLICT_SIGNATURES = (
+        "eaddrinuse", "address already in use", "port is already allocated",
+        "only one usage of each socket address",
+    )
+
+    # Log phrases meaning a dependency is missing/corrupted, mapped to the
+    # language whose install should be re-run.
+    _DEP_ERROR_SIGNATURES = {
+        "Python": ("modulenotfounderror", "no module named"),
+        "Node.js": ("cannot find module", "module_not_found", "err_module_not_found"),
+    }
+
+    def fix(self) -> bool:
+        """Diagnose and repair a project that's already been set up but isn't
+        working right now — the "day two" counterpart to the install-time
+        self-healing loop.
+
+        Runs a battery of deterministic checks (broken venv/node_modules, a
+        missing .env, a crashed container, known error signatures in the last
+        run's log), repairs what it safely can, and asks the AI for a
+        display-only diagnosis as a last resort (it never auto-runs LLM-
+        suggested commands against a live app — only install-time healing
+        does that, under its own strict allow/deny list). Finishes by
+        restarting the app so you see the result immediately.
+        """
+        print_banner("[bold cyan]DevReady[/bold cyan] — diagnosing your project 🩺")
+        console.print(f"[muted]Project: {self.project_dir}[/muted]\n")
+
+        state = self._read_state()
+        if not state.get("processes") and not state.get("last_launch"):
+            console.print(
+                "  [warning]This project has no saved setup yet — there's nothing to "
+                "fix. Run [bold]devready start[/bold] first.[/warning]"
+            )
+            return False
+
+        self.detections = detect_stack(self.project_dir)
+        repairs: List[str] = []
+        healed_languages: set = set()
+        healer = self._make_healer(self.project_dir)
+
+        # 1. Broken/missing dependencies per language (corrupt venv, missing
+        #    node_modules) — re-running setup is exactly how DevReady already
+        #    self-heals a bad install, so it self-heals a bad RUNTIME state too.
+        for det in self.detections:
+            if not self._runtime_looks_broken(det):
+                continue
+            console.print(f"  [bold]{det.language}[/bold] dependencies look broken — reinstalling…")
+            version_manager.setup_environment(self.project_dir, det, healer)
+            repairs.append(f"reinstalled {det.language} dependencies")
+            healed_languages.add(det.language)
+
+        # 2. Missing .env when a template exists (deleted or never written).
+        env_path = self.project_dir / ".env"
+        has_template = any(
+            (self.project_dir / name).exists()
+            for name in (".env.example", ".env.sample", ".env.template")
+        )
+        if not env_path.exists() and has_template:
+            console.print("  [bold].env[/bold] is missing — regenerating it from the template…")
+            env_vars.generate_env_file(
+                self.project_dir, readme_env_vars=self.insights.env_vars, interactive=False,
+            )
+            repairs.append("regenerated .env")
+
+        # 3. Container diagnosis: show WHY a crashed container died before the
+        #    restart blindly retries it — real signal beats a guess.
+        repairs.extend(self._diagnose_stopped_containers(state))
+
+        # 4. Scan the last run's log(s) for known signatures we haven't
+        #    already addressed above.
+        for log_path in self._all_last_run_logs(state):
+            try:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            low = text.lower()
+
+            for sig in self._PORT_CONFLICT_SIGNATURES:
+                if sig in low:
+                    port = self._port_from_state(state, log_path)
+                    owner = self._port_owner_info(port) if port else None
+                    if owner:
+                        console.print(
+                            f"  [warning]Port {port} is already in use by {owner}.[/warning] "
+                            f"Close it (or change this project's port) and try again."
+                        )
+                    elif port:
+                        console.print(
+                            f"  [warning]Port {port} is already in use by another program "
+                            f"on your machine.[/warning] Close whatever is using it and try again."
+                        )
+                    repairs.append("diagnosed a port conflict")
+                    break
+
+            for language, sigs in self._DEP_ERROR_SIGNATURES.items():
+                if language in healed_languages:
+                    continue  # already reinstalled above this run
+                if any(sig in low for sig in sigs):
+                    det = next((d for d in self.detections if d.language == language), None)
+                    if det:
+                        console.print(
+                            f"  Log shows a missing {language} module — reinstalling dependencies…"
+                        )
+                        version_manager.setup_environment(self.project_dir, det, healer)
+                        repairs.append(f"reinstalled {language} dependencies (log showed a missing module)")
+                        healed_languages.add(language)
+
+        # 5. Nothing deterministic to do — ask the AI for a read-only opinion
+        #    (never auto-run against a live app; install-time healing is the
+        #    only place that executes LLM-suggested commands, under its own
+        #    strict safety check).
+        if not repairs and self.config.llm.is_configured:
+            diagnosis = self._ask_runtime_diagnosis(state)
+            if diagnosis:
+                console.print(f"  [info]AI diagnosis:[/info] {diagnosis}")
+                repairs.append("got an AI diagnosis (see above)")
+
+        if not repairs:
+            console.print(
+                "  [muted]Nothing obviously broken was found. If it's still not working, "
+                f"check the log at [bold]{self._state_dir / 'last-run.log'}[/bold], or run "
+                "[bold]devready start[/bold] to redo the full setup.[/muted]"
+            )
+
+        console.print("\n  Restarting to check the result…")
+        self.stop()
+        self.run()
+        return True
+
+    def _runtime_looks_broken(self, det: "DetectionResult") -> bool:
+        """True if this language's install is missing or visibly corrupt."""
+        if det.language == "Python":
+            venv_python = version_manager._venv_python_tool(self.project_dir / ".venv", "python")
+            return not Path(venv_python).exists() or not version_manager._venv_has_pip(venv_python)
+        if det.language == "Node.js" and (self.project_dir / "package.json").exists():
+            return not (self.project_dir / "node_modules").exists()
+        return False
+
+    def _diagnose_stopped_containers(self, state: dict) -> List[str]:
+        """Print recent logs for any tracked container that exists but isn't
+        running, so a restart's retry isn't a total guess. Returns repair
+        descriptions for the summary."""
+        names = set(state.get("docker_containers") or [])
+        for p in (state.get("processes") or []) + (state.get("last_launch") or []):
+            name = self._docker_container_name(p.get("command") or [])
+            if name:
+                names.add(name)
+        if not names or not command_exists("docker"):
+            return []
+
+        env = self._launch_env()
+        done = []
+        for name in sorted(names):
+            if not self._docker_container_exists(name, env) or self._docker_container_running(name, env):
+                continue
+            console.print(f"  Container [bold]{name}[/bold] exists but isn't running — recent log:")
+            logs = run_command(["docker", "logs", "--tail", "20", name], env=env)
+            tail = (logs.stdout or logs.stderr or "(no output)").strip().splitlines()
+            for line in tail[-20:]:
+                console.print(f"    [muted]{line}[/muted]")
+            done.append(f"diagnosed the stopped container {name}")
+        return done
+
+    def _all_last_run_logs(self, state: dict) -> List[Path]:
+        """Every per-component log DevReady wrote for the last launch."""
+        names = {p.get("name", "root") for p in self._state_processes(state)}
+        names |= {p.get("name", "root") for p in (state.get("last_launch") or [])}
+        names.add("root")
+        paths = []
+        for name in names:
+            log_name = "last-run.log" if name == "root" else f"last-run-{name}.log"
+            path = self._state_dir / log_name
+            if path.exists():
+                paths.append(path)
+        return paths
+
+    def _port_from_state(self, state: dict, log_path: Path) -> Optional[int]:
+        """The port a given log's component was supposed to serve on."""
+        stem = log_path.stem  # "last-run" or "last-run-<name>"
+        name = "root" if stem == "last-run" else stem[len("last-run-"):]
+        for p in self._state_processes(state) + (state.get("last_launch") or []):
+            if p.get("name", "root") == name and p.get("port"):
+                return p["port"]
+        return None
+
+    @staticmethod
+    def _port_owner_info(port: int) -> Optional[str]:
+        """Best-effort: what process is listening on this port, as a display
+        string (e.g. "node.exe (pid 4821)"), or None if it can't be determined.
+
+        Never used to auto-kill anything — a stranger's process on the user's
+        machine is not ours to touch. This exists purely so the user gets an
+        actionable name instead of a bare "address already in use".
+        """
+        try:
+            if sys.platform == "win32":
+                out = run_command(["netstat", "-ano"]).stdout
+                pid = None
+                for line in out.splitlines():
+                    if f":{port} " in line and "LISTENING" in line.upper():
+                        pid = line.split()[-1]
+                        break
+                if not pid:
+                    return None
+                names = run_command(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"]).stdout
+                first = names.strip().strip('"').split('","')
+                name = first[0] if first and first[0] else "unknown process"
+                return f"{name} (pid {pid})"
+            if command_exists("lsof"):
+                out = run_command(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"]).stdout
+                lines = [l for l in out.splitlines() if l.strip()][1:]  # skip header
+                if not lines:
+                    return None
+                cols = lines[0].split()
+                return f"{cols[0]} (pid {cols[1]})" if len(cols) > 1 else None
+            if command_exists("ss"):
+                out = run_command(["ss", "-ltnp", f"sport = :{port}"]).stdout
+                match = re.search(r'users:\(\("([^"]+)",pid=(\d+)', out)
+                return f"{match.group(1)} (pid {match.group(2)})" if match else None
+        except Exception:
+            return None
+        return None
+
+    def _ask_runtime_diagnosis(self, state: dict) -> Optional[str]:
+        """Ask the LLM for a plain-language, READ-ONLY diagnosis of why the
+        app isn't working, from its own log. Never executes anything — this
+        is display-only, unlike the install-time healer's guarded auto-fixes.
+        """
+        from .ai.client import ask_llm_json
+
+        logs = self._all_last_run_logs(state)
+        if not logs:
+            return None
+        tail = ""
+        for path in logs:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            tail += f"\n--- {path.name} ---\n" + "\n".join(text.splitlines()[-40:])
+        if not tail.strip():
+            return None
+
+        system = (
+            "A previously-installed project isn't running correctly. Read its recent "
+            "log output and explain, in ONE short plain-language sentence, the most "
+            "likely cause. Return ONLY JSON: {\"diagnosis\": \"...\"}. If you can't "
+            "tell from the log, say so honestly in that sentence."
+        )
+        data = ask_llm_json(self.config, system, f"Recent log output:\n{tail[-6000:]}", timeout=25)
+        if not data:
+            return None
+        diagnosis = str(data.get("diagnosis", "")).strip()
+        return diagnosis or None
+
     # -- Step 1: Project detection -------------------------------------------
     def _step_detect(self) -> None:
         print_step(1, TOTAL_STEPS, "Project Detection")
