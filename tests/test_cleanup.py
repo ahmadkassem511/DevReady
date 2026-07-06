@@ -124,36 +124,37 @@ def test_pnpm_store_dir_clears_all_versions(monkeypatch, tmp_path):
 
 
 def test_pnpm_store_dir_falls_back_to_default_when_pnpm_absent(monkeypatch, tmp_path):
-    # yarn/pnpm scenario: the tool is gone but its multi-GB store lingers.
+    # The tool is gone but its multi-GB store lingers. Use the home-based
+    # (XDG/macOS/legacy) default so the test is OS-agnostic — forcing os.name
+    # would make pathlib build a WindowsPath and crash on Linux/macOS.
     import devready.environment.cleanup as cu
 
     monkeypatch.setattr(cu, "command_exists", lambda n: False)
-    monkeypatch.setattr(cu.os, "name", "nt")
-    local = tmp_path / "Local"
-    (local / "pnpm" / "store").mkdir(parents=True)
-    monkeypatch.setenv("LOCALAPPDATA", str(local))
-    assert cu._pnpm_store_dir() == local / "pnpm" / "store"
+    # home is isolated to tmp_path/home by the autouse fixture.
+    store = tmp_path / "home" / ".local" / "share" / "pnpm" / "store"
+    store.mkdir(parents=True)
+    assert cu._pnpm_store_dir() == store
 
 
 def test_cleanup_clears_pnpm_store_and_yarn_cache(monkeypatch, tmp_path):
     import devready.environment.cleanup as cu
 
-    local = tmp_path / "Local"
-    store = local / "pnpm" / "store"
+    home = tmp_path / "home"
+    # pnpm reports its own store path (OS-agnostic — no os.name forcing).
+    store = home / "pnpm-store"
     (store / "v11").mkdir(parents=True)
     (store / "v11" / "big.dat").write_text("data")
-    yarn_cache = local / "Yarn" / "Cache"
+    # A yarn cache location _yarn_cache_dirs returns on EVERY OS (~/.cache/yarn),
+    # so the test doesn't depend on the Windows-only %LOCALAPPDATA%\Yarn path.
+    yarn_cache = home / ".cache" / "yarn"
     yarn_cache.mkdir(parents=True)
     (yarn_cache / "pkg.tgz").write_text("data")
 
-    monkeypatch.setenv("LOCALAPPDATA", str(local))
-    monkeypatch.setattr(cu.os, "name", "nt")
     monkeypatch.setattr(cu, "command_exists", lambda n: n == "pnpm")
     monkeypatch.setattr(
         cu, "run_command",
         lambda cmd, **k: CommandResult("x", 0, stdout=str(store / "v3")),
     )
-    monkeypatch.setattr(cu.Path, "home", lambda: tmp_path / "home")
     monkeypatch.setattr(cu, "free_disk_bytes", lambda: 0)
 
     report = cu.cleanup_caches()
