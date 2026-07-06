@@ -247,10 +247,13 @@ where you can:
   project created, so the disk space actually comes back. Projects still
   missing an API key show a **Finish setup** shortcut right on their card.
 - **Settings → Free up disk space** reclaims the shared caches installs fill up
-  (pip wheels, npm packages, the npx cache, cargo crates, Docker's unused data)
-  with one click and tells you how much it freed. When free disk drops below
-  5 GB, a **low-disk banner** appears at the top of the app with a one-click
-  fix — before an install fails halfway.
+  — pip wheels, npm packages, the npx cache, cargo crates, the **pnpm store**
+  (often the single biggest — gigabytes across format versions, which `pnpm
+  store prune` never fully reclaims), the **yarn cache** (cleared even after
+  yarn itself is uninstalled), and Docker's unused data — with one click, and
+  tells you how much it freed. When free disk drops below 5 GB, a **low-disk
+  banner** appears at the top of the app with a one-click fix — before an
+  install fails halfway.
 
 ### Adding the free AI key (optional, in the browser)
 

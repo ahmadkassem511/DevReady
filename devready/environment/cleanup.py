@@ -12,6 +12,7 @@ and reports how much space actually came back.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -21,12 +22,15 @@ from ..utils import CommandResult, command_exists, console, force_rmtree, run_co
 
 # (label, argv, head-that-must-exist). Every entry is a CACHE: clearing it can
 # never break an installed project — the worst case is a slower next install.
+# NOTE: pnpm and yarn are handled by DIRECTORY clearing below, not here — their
+# own `clean`/`prune` commands are unreliable for reclaiming space (pnpm's
+# prune only touches the current store version and leaves gigabytes in older
+# vN folders; yarn's cache lingers after yarn itself is uninstalled). Clearing
+# the cache directory is a pure cache operation and reclaims it in full.
 _CACHE_CLEANERS: List[Tuple[str, List[str], str]] = [
     ("pip download cache", [sys.executable, "-m", "pip", "cache", "purge"], ""),
     ("npm cache", ["npm", "cache", "clean", "--force"], "npm"),
     ("uv cache (interpreters & wheels)", ["uv", "cache", "clean"], "uv"),
-    ("pnpm store", ["pnpm", "store", "prune"], "pnpm"),
-    ("yarn cache", ["yarn", "cache", "clean"], "yarn"),
 ]
 
 
@@ -39,8 +43,61 @@ def _npm_cache_dir() -> Optional[Path]:
     return Path(path) if result.ok and path and path.lower() != "undefined" else None
 
 
+def _pnpm_store_dir() -> Optional[Path]:
+    """The pnpm content-addressable STORE root (parent of the v3/v10/v11… dirs).
+
+    pnpm keeps a separate store per format version; over pnpm upgrades these
+    accumulate (v10 + v11 + v3 …) and `pnpm store prune` only ever touches the
+    CURRENT one, stranding gigabytes. So we clear the whole store root. Asks
+    pnpm where the store is (authoritative), then falls back to the per-OS
+    default location for when pnpm itself is no longer on PATH but its store
+    lingers.
+    """
+    if command_exists("pnpm"):
+        result = run_command(["pnpm", "store", "path"])
+        raw = result.stdout.strip()
+        if result.ok and raw:
+            store_path = Path(raw)
+            # `pnpm store path` → …/store/v3 ; clear the parent `store` root so
+            # every version (v3/v10/v11…) goes, not just the current one.
+            if re.fullmatch(r"v\d+", store_path.name):
+                return store_path.parent
+            return store_path
+    home = Path.home()
+    candidates = []
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            candidates.append(Path(local) / "pnpm" / "store")
+    candidates += [
+        home / ".local" / "share" / "pnpm" / "store",  # Linux (XDG)
+        home / "Library" / "pnpm" / "store",           # macOS
+        home / ".pnpm-store",                           # legacy / custom
+    ]
+    return next((c for c in candidates if c.exists()), None)
+
+
+def _yarn_cache_dirs() -> List[Path]:
+    """Yarn cache directories (classic + Berry global). NOT yarn's global
+    package installs or config — only the re-downloadable package cache."""
+    home = Path.home()
+    dirs: List[Path] = []
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            dirs.append(Path(local) / "Yarn" / "Cache")   # classic (Windows)
+    dirs += [
+        home / "Library" / "Caches" / "Yarn",             # classic (macOS)
+        home / ".cache" / "yarn",                         # classic (Linux)
+        home / ".yarn" / "berry" / "cache",               # Berry global cache
+    ]
+    return dirs
+
+
 def _extra_cache_dirs() -> List[Tuple[str, Path]]:
-    """Re-downloadable cache dirs that no tool's own `clean` command reaches."""
+    """Re-downloadable cache dirs cleared by removing the directory itself —
+    for caches no tool `clean` command reliably reclaims (or where the tool
+    that made them is no longer installed to run its cleaner)."""
     dirs: List[Tuple[str, Path]] = []
     npm_cache = _npm_cache_dir()
     if npm_cache:
@@ -50,6 +107,13 @@ def _extra_cache_dirs() -> List[Tuple[str, Path]]:
     cargo = Path.home() / ".cargo" / "registry"
     dirs.append(("cargo downloaded crates", cargo / "cache"))
     dirs.append(("cargo crate sources", cargo / "src"))
+    # pnpm store (often the single biggest cache — gigabytes across versions).
+    pnpm_store = _pnpm_store_dir()
+    if pnpm_store:
+        dirs.append(("pnpm store (all versions)", pnpm_store))
+    # yarn cache (survives even after yarn is uninstalled).
+    for yarn_cache in _yarn_cache_dirs():
+        dirs.append(("yarn cache", yarn_cache))
     return dirs
 
 
