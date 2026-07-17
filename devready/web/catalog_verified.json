@@ -3,103 +3,103 @@
     "fastapi": {
       "windows": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 26
+        "checked_at": "2026-07-17",
+        "seconds": 30
       },
       "linux": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 12
+        "checked_at": "2026-07-17",
+        "seconds": 13
       },
       "macos": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 11
+        "checked_at": "2026-07-17",
+        "seconds": 12
       }
     },
     "open-webui": {
       "linux": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 125
+        "checked_at": "2026-07-17",
+        "seconds": 94
       },
       "windows": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 304
+        "checked_at": "2026-07-17",
+        "seconds": 402
       },
       "macos": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 151
+        "checked_at": "2026-07-17",
+        "seconds": 188
       }
     },
     "gradio-demo": {
       "linux": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 174
+        "checked_at": "2026-07-17",
+        "seconds": 163
       },
       "windows": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 3023
+        "checked_at": "2026-07-17",
+        "seconds": 1969
       },
       "macos": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 112
+        "checked_at": "2026-07-17",
+        "seconds": 127
       }
     },
     "excalidraw": {
       "linux": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 302
+        "checked_at": "2026-07-17",
+        "seconds": 321
       },
       "windows": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 388
+        "checked_at": "2026-07-17",
+        "seconds": 373
       },
       "macos": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 251
+        "checked_at": "2026-07-17",
+        "seconds": 214
       }
     },
     "streamlit": {
       "linux": {
         "ok": false,
-        "checked_at": "2026-07-16",
-        "seconds": 140
+        "checked_at": "2026-07-17",
+        "seconds": 104
       },
       "windows": {
         "ok": false,
-        "checked_at": "2026-07-16",
-        "seconds": 17
+        "checked_at": "2026-07-17",
+        "seconds": 15
       },
       "macos": {
         "ok": false,
-        "checked_at": "2026-07-16",
-        "seconds": 181
+        "checked_at": "2026-07-17",
+        "seconds": 129
       }
     },
     "whisper": {
       "linux": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 102
+        "checked_at": "2026-07-17",
+        "seconds": 111
       },
       "windows": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 91
+        "checked_at": "2026-07-17",
+        "seconds": 88
       },
       "macos": {
         "ok": true,
-        "checked_at": "2026-07-16",
-        "seconds": 39
+        "checked_at": "2026-07-17",
+        "seconds": 49
       }
     }
   }
